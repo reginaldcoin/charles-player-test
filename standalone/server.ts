@@ -31,6 +31,11 @@ mkdirSync(dirname(DB_PATH), { recursive: true });
 const sqlite = new Database(DB_PATH, { create: true });
 sqlite.exec("PRAGMA journal_mode = WAL;");
 
+// Reconcile with whatever a previous boot actually built, not just with the
+// tracking table: the pre-tracking build crashed mid-migration-run on real
+// deployments (0001 committed, then 0002 died on re-run), leaving a database
+// whose schema is ahead of this table. Infer applied files from the schema
+// itself so any such database heals on the next boot.
 sqlite.exec(
   "CREATE TABLE IF NOT EXISTS __standalone_migrations (name TEXT PRIMARY KEY)",
 );
@@ -38,6 +43,65 @@ const appliedRows = sqlite
   .query("SELECT name FROM __standalone_migrations")
   .all() as { name: string }[];
 const applied = new Set(appliedRows.map((r) => r.name));
+
+const existingTables = new Set(
+  (
+    sqlite
+      .query(
+        "SELECT name FROM sqlite_master WHERE type IN ('table','index')",
+      )
+      .all() as { name: string }[]
+  ).map((r) => r.name),
+);
+const listenerStateCols = existingTables.has("listener_state")
+  ? new Set(
+      (
+        sqlite.query("PRAGMA table_info(listener_state)").all() as {
+          name: string;
+        }[]
+      ).map((r) => r.name),
+    )
+  : new Set<string>();
+const playsCols = existingTables.has("plays")
+  ? new Set(
+      (sqlite.query("PRAGMA table_info(plays)").all() as { name: string }[]).map(
+        (r) => r.name,
+      ),
+    )
+  : new Set<string>();
+
+function markApplied(file: string) {
+  sqlite
+    .query(
+      "INSERT OR IGNORE INTO __standalone_migrations (name) VALUES (?)",
+    )
+    .run(file);
+  applied.add(file);
+}
+
+// 0001 created `entries` (scaffold table; nothing else depends on it).
+if (existingTables.has("entries")) markApplied("0001_initial.sql");
+// 0002 created the listeners-board tables.
+if (
+  ["listeners", "sessions", "plays", "listener_days", "listener_state"].every(
+    (t) => existingTables.has(t),
+  )
+)
+  markApplied("0002_listeners_board_tables.sql");
+// 0003 added window_credit_sec to listener_state.
+if (listenerStateCols.has("window_credit_sec"))
+  markApplied("0003_add_window_credit_to_listener_state.sql");
+// 0004 rebuilt plays/listener_state with fractional (REAL) score columns;
+// its signature is plays.points stored as REAL (it was INTEGER before).
+const playsPointsType = existingTables.has("plays")
+  ? (
+      sqlite.query("PRAGMA table_info(plays)").all() as {
+        name: string;
+        type: string;
+      }[]
+    ).find((c) => c.name === "points")?.type
+  : undefined;
+if (playsPointsType === "REAL") markApplied("0004_fractional_points.sql");
 
 const migrationsDir = join(ROOT, "drizzle");
 for (const file of readdirSync(migrationsDir)
@@ -49,9 +113,7 @@ for (const file of readdirSync(migrationsDir)
     const trimmed = stmt.trim();
     if (trimmed) sqlite.exec(trimmed);
   }
-  sqlite
-    .query("INSERT INTO __standalone_migrations (name) VALUES (?)")
-    .run(file);
+  markApplied(file);
 }
 
 const db = drizzle(sqlite, { schema });
