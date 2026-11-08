@@ -31,15 +31,27 @@ mkdirSync(dirname(DB_PATH), { recursive: true });
 const sqlite = new Database(DB_PATH, { create: true });
 sqlite.exec("PRAGMA journal_mode = WAL;");
 
+sqlite.exec(
+  "CREATE TABLE IF NOT EXISTS __standalone_migrations (name TEXT PRIMARY KEY)",
+);
+const appliedRows = sqlite
+  .query("SELECT name FROM __standalone_migrations")
+  .all() as { name: string }[];
+const applied = new Set(appliedRows.map((r) => r.name));
+
 const migrationsDir = join(ROOT, "drizzle");
 for (const file of readdirSync(migrationsDir)
   .filter((f) => f.endsWith(".sql"))
   .sort()) {
+  if (applied.has(file)) continue;
   const sqlText = readFileSync(join(migrationsDir, file), "utf8");
   for (const stmt of sqlText.split("--> statement-breakpoint")) {
     const trimmed = stmt.trim();
     if (trimmed) sqlite.exec(trimmed);
   }
+  sqlite
+    .query("INSERT INTO __standalone_migrations (name) VALUES (?)")
+    .run(file);
 }
 
 const db = drizzle(sqlite, { schema });
