@@ -1,0 +1,4 @@
+[install]
+linker = "hoisted"
+auto = "disable"
+saveTextLockfile = true

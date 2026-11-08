@@ -1,0 +1,152 @@
+@import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+@import "./nes.min.css";
+@import "tailwindcss";
+@import "tailwindcss-safe-area";
+
+/* NES re-skin (owner's order, 2026-11-08): this player belongs to
+   charleshamilton.app, whose design language IS the NES retro-game
+   system. The foundation above is the site's own stack, unmodified:
+   NES.css 2.3.0 (the exact build the site loads from unpkg, vendored
+   byte-for-byte at ./nes.min.css) + Press Start 2P. Palette and the
+   site's custom classes below are copied from the main site's own CSS:
+   black ground, white type, #1a1a1a containers with white borders,
+   hot pink #ff69b4 in the lead, purple / green / yellow buttons. */
+
+@theme {
+  --text-xs: 11px;
+  --text-xs--line-height: 16px;
+  --text-sm: 16px;
+  --text-sm--line-height: 24px;
+  --text-base: 16px;
+  --text-base--line-height: 24px;
+  --text-lg: 24px;
+  --text-lg--line-height: 32px;
+  --text-xl: 24px;
+  --text-xl--line-height: 32px;
+  --text-2xl: 36px;
+  --text-2xl--line-height: 40px;
+  --text-3xl: 54px;
+  --text-3xl--line-height: 56px;
+  --text-4xl: 81px;
+  --text-4xl--line-height: 84px;
+  --text-5xl: 121px;
+  --text-5xl--line-height: 124px;
+}
+
+:root {
+  color-scheme: dark;
+  --bg: #000000;
+  --surface: #000000;
+  --surface-alt: #1a1a1a;
+  --text: #ffffff;
+  --dim: #a8a8a8;
+  --border: #ffffff;
+  --accent: #ff69b4;
+  --accent-purple: #c084fc;
+  --accent-green: #4ade80;
+  --accent-yellow: #fde047;
+  --on-accent: #000000;
+  --radius: 0px;
+  --space-surface: var(--surface);
+  --space-surface-alt: var(--surface-alt);
+  --space-muted: var(--dim);
+  --space-border: var(--border);
+  --space-accent: var(--accent);
+}
+
+html,
+body {
+  background: var(--bg);
+}
+
+body {
+  /* The main site's body rule: the whole page speaks pixel type. */
+  font-family: "Press Start 2P", cursive;
+  line-height: 1.4;
+}
+
+.font-pixel {
+  font-family: "Press Start 2P", "Courier New", monospace;
+  letter-spacing: 0; /* never letterspace a pixel font — it breaks its grid */
+}
+
+.font-data {
+  font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- charleshamilton.app's own custom layer over NES.css ---------------
+   Copied from the main site's stylesheet: its button color family, its
+   container treatment, its balloon colors, its pink titles and footer. */
+
+.nes-btn.is-pink {
+  background-color: #ff69b4 !important;
+  color: #fff !important;
+  border-color: #ff69b4 !important;
+}
+.nes-btn.is-purple {
+  background-color: #c084fc !important;
+  color: #fff !important;
+  border-color: #c084fc !important;
+}
+.nes-btn.is-green {
+  background-color: #4ade80 !important;
+  color: #000 !important;
+  border-color: #4ade80 !important;
+}
+.nes-btn.is-yellow {
+  background-color: #fde047 !important;
+  color: #000 !important;
+  border-color: #fde047 !important;
+}
+.nes-btn.is-white {
+  background-color: #fff !important;
+  color: #000 !important;
+  border-color: #000 !important;
+  font-weight: bold;
+}
+
+.nes-container {
+  background-color: #1a1a1a !important;
+  border-color: #fff;
+}
+.nes-container .title {
+  background-color: #1a1a1a !important;
+  color: #fff;
+}
+
+.nes-balloon {
+  color: #000 !important;
+  background-color: #fff !important;
+}
+
+/* The site's lead pink runs its column titles and footer; here it runs
+   the section titles and the footer line. */
+.column-title {
+  color: #ff69b4;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Room mode: after 60s idle the chrome rests. Any tap brings it back. */
+.room-mode .chrome {
+  opacity: 0;
+  pointer-events: none;
+}
+.chrome {
+  transition: opacity 600ms linear;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chrome {
+    transition: none;
+  }
+}

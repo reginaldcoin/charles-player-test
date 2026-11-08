@@ -1,0 +1,10 @@
+node_modules/
+.bun-cache/
+data/
+app.db
+app.db-*
+client/dist/
+client/dist-cvm/
+client/.tsbuildinfo.client
+server/.tsbuildinfo.server
+*.log
