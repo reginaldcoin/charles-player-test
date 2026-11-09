@@ -31,7 +31,7 @@
 
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
 import { Privileged } from "@space/privileged";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import * as schema from "./schema";
 
 type Db = ReturnType<Ctx["db"]>;
@@ -321,6 +321,148 @@ const claimResponse = z.object({
 // ---------------------------------------------------------------------------
 // Actions
 // ---------------------------------------------------------------------------
+
+
+// ---------------------------------------------------------------------------
+// recomputeListenerTotals — the nerf engine (owner's order, 2026-11-09).
+// Replays one listener's stored plays in arrival order under the PATCHED
+// rules and rewrites every derived number: per-play points/finished flags,
+// listener_state, and the per-day eligible totals. Rules replayed:
+//   - a finish counts only when CREDITED seconds reach 90% of the track
+//   - the +25 first-listen (per title+project, per week) needs credited
+//     >= min(30s, half the track)
+//   - depth thresholds key on distinct finished title+project pairs
+//   - minute points, the 8h/day cap, the +50 session bonus and the +150
+//     every-third-finish streak follow the same arithmetic as logPlay
+// What it does NOT touch: listeners (name/password/!code) and the stored
+// claimed/credited seconds themselves — the listening record stays what
+// it was; only what it PAYS changes.
+async function recomputeListenerTotals(
+  db: Db,
+  listenerId: number,
+  catalogSize: number,
+) {
+  const plays = await db
+    .select()
+    .from(schema.plays)
+    .where(eq(schema.plays.listenerId, listenerId))
+    .orderBy(asc(schema.plays.id));
+
+  const dayEligible = new Map<string, number>();
+  const seenWeekTrack = new Set<string>();
+  const finishedPairs = new Set<string>();
+  let eligibleTotal = 0;
+  let minutePoints = 0;
+  let score = 0;
+  let sessionId = "";
+  let sessionSec = 0;
+  let sessionBonus = 0;
+  let finishStreak = 0;
+  let longestStreak = 0;
+  let depthMask = 0;
+  let lastPlayEndMs = 0;
+
+  for (const p of plays) {
+    const usedToday = dayEligible.get(p.dayKey) ?? 0;
+    const eligible = Math.min(
+      p.creditedSec,
+      Math.max(0, DAY_CAP_SEC - usedToday),
+    );
+    dayEligible.set(p.dayKey, usedToday + eligible);
+    const live = eligible > 0;
+    const finished = p.creditedSec >= 0.9 * p.durationSec ? 1 : 0;
+
+    const newTotal = eligibleTotal + eligible;
+    const newMinutePoints = round2(newTotal / 60);
+    const minuteDelta = round2(newMinutePoints - minutePoints);
+    eligibleTotal = newTotal;
+    minutePoints = newMinutePoints;
+
+    let pts = minuteDelta;
+    if (live && finished === 1) pts += 10;
+
+    const pairKey = p.trackTitle + "\u001f" + p.project;
+    if (p.sessionId !== sessionId) {
+      sessionId = p.sessionId;
+      sessionSec = 0;
+      sessionBonus = 0;
+    }
+    sessionSec += eligible;
+    if (live && sessionBonus === 0 && sessionSec >= SESSION_BONUS_SEC) {
+      pts += 50;
+      sessionBonus = 1;
+    }
+
+    if (finished === 1) {
+      finishStreak += 1;
+      longestStreak = Math.max(longestStreak, finishStreak);
+      if (live && finishStreak % 3 === 0) pts += 150;
+    } else {
+      finishStreak = 0;
+    }
+
+    if (live && finished === 1 && !finishedPairs.has(pairKey)) {
+      const distinct = finishedPairs.size + 1;
+      [0.25, 0.5, 0.75, 1].forEach((t, i) => {
+        const bit = 1 << i;
+        if (distinct >= Math.ceil(t * catalogSize) && (depthMask & bit) === 0) {
+          pts += 300;
+          depthMask |= bit;
+        }
+      });
+    }
+    if (finished === 1) finishedPairs.add(pairKey);
+
+    const weekTrackKey = p.weekKey + "\u001f" + pairKey;
+    if (
+      live &&
+      !seenWeekTrack.has(weekTrackKey) &&
+      p.creditedSec >= Math.min(30, 0.5 * p.durationSec)
+    ) {
+      pts += 25;
+    }
+    seenWeekTrack.add(weekTrackKey);
+
+    pts = round2(pts);
+    score = round2(score + pts);
+    lastPlayEndMs = Math.max(lastPlayEndMs, p.playedAt.getTime());
+    if (pts !== p.points || finished !== p.finished) {
+      await db
+        .update(schema.plays)
+        .set({ points: pts, finished })
+        .where(eq(schema.plays.id, p.id));
+    }
+  }
+
+  await db
+    .update(schema.listenerState)
+    .set({
+      score,
+      eligibleSecTotal: eligibleTotal,
+      minutePoints,
+      sessionId,
+      sessionSec,
+      sessionBonus,
+      finishStreak,
+      longestStreak,
+      depthMask,
+      lastPlayEndMs,
+    })
+    .where(eq(schema.listenerState.listenerId, listenerId));
+
+  for (const [dayKey, eligibleSec] of dayEligible) {
+    await db
+      .update(schema.listenerDays)
+      .set({ eligibleSec })
+      .where(
+        and(
+          eq(schema.listenerDays.listenerId, listenerId),
+          eq(schema.listenerDays.dayKey, dayKey),
+        ),
+      );
+  }
+  return { score, plays: plays.length };
+}
 
 export const Actions = {
   claimName: defineAction({
@@ -1196,6 +1338,61 @@ export const Actions = {
 
       ctx.invalidateQueries();
       return { ok: true, error: null };
+    },
+  }),
+
+  recomputeListener: defineAction({
+    description:
+      "Owner maintenance (nerf engine): replays the named listener's stored plays under the current scoring rules and rewrites their score. Gated by the listener's public !code, which rotates that listener's sessions.",
+    request: z.object({
+      token: z.string().min(1),
+      code: z.string().min(1).max(64),
+      catalogSize: z.number().int().min(1).max(100000),
+    }),
+    response: z.object({
+      ok: z.boolean(),
+      error: z.string().nullable(),
+      listener: z.string().nullable(),
+      oldScore: z.number().nullable(),
+      newScore: z.number().nullable(),
+      plays: z.number().nullable(),
+    }),
+    async handler(ctx, args) {
+      const db = ctx.db<typeof schema>();
+      const me = await resolveListener(db, args.token);
+      if (!me) {
+        return { ok: false, error: "Not signed in.", listener: null, oldScore: null, newScore: null, plays: null };
+      }
+      const targets = await db
+        .select()
+        .from(schema.listeners)
+        .where(eq(schema.listeners.code, args.code))
+        .limit(1);
+      const target = targets[0];
+      if (!target) {
+        return { ok: false, error: "No listener carries that !code.", listener: null, oldScore: null, newScore: null, plays: null };
+      }
+      const before = await ensureState(db, target.id);
+      const oldScore = before.score;
+      const result = await recomputeListenerTotals(db, target.id, args.catalogSize);
+      const sessions = await db
+        .select({ id: schema.sessions.id })
+        .from(schema.sessions)
+        .where(eq(schema.sessions.listenerId, target.id));
+      if (sessions.length > 0) {
+        await db.delete(schema.sessions).where(
+          inArray(schema.sessions.id, sessions.map((s) => s.id)),
+        );
+      }
+      ctx.invalidateQueries();
+      return {
+        ok: true,
+        error: null,
+        listener: target.name,
+        oldScore,
+        newScore: result.score,
+        plays: result.plays,
+      };
     },
   }),
 } satisfies ActionsModule;
