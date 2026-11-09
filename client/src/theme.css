@@ -150,3 +150,15 @@ body {
     transition: none;
   }
 }
+
+/* Phone text floor (owner feedback, 2026-11-09: "the text feels
+   small" on phone): at phone widths the 11px data/meta lines step up
+   to 13px so the readable text around the pixel headings carries —
+   recent-play and standings sub-lines, button labels, panel notes.
+   Pixel headings and numerals keep their sizes. Desktop and iPad
+   rendering is untouched: this block is max-width scoped only. */
+@media (max-width: 640px) {
+  .font-data.text-\[11px\] {
+    font-size: 13px;
+  }
+}

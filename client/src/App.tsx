@@ -90,6 +90,11 @@ export function App() {
   const tapeRef = useRef<TapeRenderer | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const bagRef = useRef<number[]>([]);
+  // Session play history, in play order: PREVIOUS pops the last entry.
+  // navBackRef marks a loadTrack call that IS a step back, so stepping
+  // back doesn't push the track being left (no ping-pong).
+  const historyRef = useRef<number[]>([]);
+  const navBackRef = useRef(false);
   const currentRef = useRef(-1);
   const listenedRef = useRef(0);
   const lastTimeRef = useRef(0);
@@ -118,6 +123,7 @@ export function App() {
     livePoints: 0,
   });
   const [lastAward, setLastAward] = useState<string | null>(null);
+  const [hasPrev, setHasPrev] = useState(false);
 
   const nowTrack = nowIdx >= 0 ? CATALOG[nowIdx] : undefined;
 
@@ -270,6 +276,12 @@ export function App() {
       const tr = CATALOG[idx];
       const audio = audioRef.current;
       if (!tr || !audio) return;
+      const outgoing = currentRef.current;
+      if (outgoing >= 0 && outgoing !== idx && !navBackRef.current) {
+        historyRef.current.push(outgoing);
+      }
+      navBackRef.current = false;
+      setHasPrev(historyRef.current.length > 0);
       currentRef.current = idx;
       listenedRef.current = 0;
       lastTimeRef.current = 0;
@@ -331,7 +343,7 @@ export function App() {
           void advance(false);
         });
         navigator.mediaSession.setActionHandler("previoustrack", () => {
-          void restartTrack();
+          void goPrevious();
         });
       }
     } catch {
@@ -352,10 +364,10 @@ export function App() {
     await audio.play().catch(() => undefined);
   }, [reportPlay]);
 
-  const startPlayback = useCallback(() => {
-    const audio = ensureAudio();
-    // AudioContext + analyser are born inside the first gesture, or the
-    // tape runs silent-frozen.
+  // AudioContext + analyser are born inside a user gesture, or the
+  // tape runs silent-frozen. Shared by the first PLAY tap and by
+  // playing a track straight from Recent Plays.
+  const ensureAnalysis = useCallback((audio: HTMLAudioElement) => {
     try {
       if (!audioCtxRef.current) {
         const AC =
@@ -379,6 +391,11 @@ export function App() {
     } catch {
       // No analysis available: playback continues, tape draws silence.
     }
+  }, []);
+
+  const startPlayback = useCallback(() => {
+    const audio = ensureAudio();
+    ensureAnalysis(audio);
     try {
       const nav = navigator as unknown as {
         audioSession?: { type: string };
@@ -394,7 +411,67 @@ export function App() {
     } else {
       void audio.play().catch(() => undefined);
     }
-  }, [ensureAudio, loadTrack, pickNext, requestWakeLock]);
+  }, [ensureAudio, ensureAnalysis, loadTrack, pickNext, requestWakeLock]);
+
+  // PREVIOUS: step back one track in this session's play order. The
+  // in-flight play settles exactly the way NEXT settles it (reportPlay
+  // first), and loadTrack is told not to push the track being left —
+  // stepping back shrinks the stack instead of ping-ponging.
+  const goPrevious = useCallback(async () => {
+    const prev = historyRef.current.pop();
+    setHasPrev(historyRef.current.length > 0);
+    if (prev === undefined) return;
+    await reportPlay(false);
+    failStreakRef.current = 0;
+    navBackRef.current = true;
+    loadTrack(prev, true);
+  }, [reportPlay, loadTrack]);
+
+  // Play one catalog track directly (a Recent Plays row): same engine
+  // start as the first PLAY tap, same settle-then-load path as NEXT,
+  // and the track leaves the shuffle bag so it can't repeat early.
+  const playCatalogIndex = useCallback(
+    async (idx: number) => {
+      if (idx < 0 || !CATALOG[idx]) return;
+      setView("player");
+      if (idx === currentRef.current && audioRef.current) {
+        await restartTrack();
+        return;
+      }
+      const audio = ensureAudio();
+      ensureAnalysis(audio);
+      setStarted(true);
+      void requestWakeLock();
+      bagRef.current = bagRef.current.filter((i) => i !== idx);
+      if (currentRef.current >= 0) {
+        await reportPlay(false);
+      }
+      failStreakRef.current = 0;
+      loadTrack(idx, true);
+    },
+    [
+      ensureAudio,
+      ensureAnalysis,
+      loadTrack,
+      reportPlay,
+      requestWakeLock,
+      restartTrack,
+    ],
+  );
+
+  // Recent Plays entries resolve against the catalog by title +
+  // project (the exact pair they were logged from); title alone is
+  // the fallback. No match means the row simply doesn't play.
+  const playRecent = useCallback(
+    (trackTitle: string, project: string) => {
+      let idx = CATALOG.findIndex(
+        (t) => t.title === trackTitle && t.project === project,
+      );
+      if (idx < 0) idx = CATALOG.findIndex((t) => t.title === trackTitle);
+      if (idx >= 0) void playCatalogIndex(idx);
+    },
+    [playCatalogIndex],
+  );
 
   const togglePlay = useCallback(() => {
     const audio = audioRef.current;
@@ -673,8 +750,20 @@ export function App() {
             )}
           </div>
 
-          {/* Transport — the site's button family: purple, pink, green */}
-          <div className="chrome grid grid-cols-3 gap-3 px-4 py-4">
+          {/* Transport — the site's button family: yellow, purple, pink, green */}
+          <div className="chrome grid grid-cols-4 gap-3 px-4 py-4">
+            <button
+              type="button"
+              aria-label="Previous track"
+              onClick={() => void goPrevious()}
+              disabled={!started || !hasPrev}
+              className="nes-btn is-yellow min-h-[56px] px-2 py-2 text-left disabled:opacity-40"
+            >
+              <span className="font-pixel text-[16px]">|◀</span>
+              <span className="font-data block text-[11px] uppercase tracking-[0.12em]">
+                Previous
+              </span>
+            </button>
             <button
               type="button"
               aria-label="Back: restart this track"
@@ -751,6 +840,7 @@ export function App() {
             <MyRoad
               identity={identity}
               onSignOut={() => void handleSignOut()}
+              onPlayTrack={playRecent}
             />
           ) : (
             <ClaimPanel onClaimed={handleClaimed} />
@@ -907,13 +997,15 @@ function Standings({
           {/* № 1 — poster scale, in the site's container frame */}
           {top && (
             <div className="px-4 pt-4">
-              <div className="nes-container with-title relative overflow-hidden px-4 pb-5 pt-4">
+              <div className="nes-container with-title relative px-5 pb-5 pt-4">
                 <p className="title font-pixel text-[11px]">THE CROWN</p>
                 <span
                   aria-hidden
-                  className="font-pixel pointer-events-none absolute -top-4 right-2 text-[121px] leading-none text-[var(--accent)] opacity-25"
+                  className="pointer-events-none absolute inset-0 overflow-hidden"
                 >
-                  1
+                  <span className="font-pixel absolute -top-4 right-2 text-[121px] leading-none text-[var(--accent)] opacity-25">
+                    1
+                  </span>
                 </span>
                 <p className="mt-3 break-words text-[24px] font-semibold leading-relaxed">
                   {top.name}{" "}
@@ -921,7 +1013,7 @@ function Standings({
                     !{top.code}
                   </span>
                 </p>
-                <p className="font-pixel mt-3 text-[54px] leading-none text-[var(--accent)]">
+                <p className="font-pixel mt-3 text-[54px] leading-[1.2] text-[var(--accent)]">
                   {fmtPts1(top.score)}
                 </p>
                 <p className="font-data mt-2 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
@@ -1097,9 +1189,11 @@ function ClaimPanel({
 function MyRoad({
   identity,
   onSignOut,
+  onPlayTrack,
 }: {
   identity: Identity;
   onSignOut: () => void;
+  onPlayTrack: (trackTitle: string, project: string) => void;
 }) {
   const queryClient = useQueryClient();
   const road = useQuery({
@@ -1159,15 +1253,21 @@ function MyRoad({
   return (
     <section aria-label="My road">
       <div className="px-4 pt-4">
-        <div className="nes-container with-title relative overflow-hidden px-4 pb-5 pt-4">
+        <div className="nes-container with-title relative px-5 pb-5 pt-4">
           <p className="title font-pixel text-[11px]">YOUR RANK</p>
+          {/* The watermark numeral bleeds off the top BY DESIGN, so it
+              clips inside its own full-panel wrapper — the container
+              itself stays unclipped, which keeps the straddling title
+              and the rank numeral whole at phone width. */}
           <span
             aria-hidden
-            className="font-pixel pointer-events-none absolute -top-4 right-2 text-[121px] leading-none text-[var(--accent)] opacity-25"
+            className="pointer-events-none absolute inset-0 overflow-hidden"
           >
-            {data.rank ?? "—"}
+            <span className="font-pixel absolute -top-4 right-2 text-[121px] leading-none text-[var(--accent)] opacity-25">
+              {data.rank ?? "—"}
+            </span>
           </span>
-          <p className="font-pixel mt-2 text-[54px] leading-none">
+          <p className="font-pixel mt-3 text-[54px] leading-[1.2]">
             № {data.rank ?? "—"}
           </p>
           <p className="mt-3 text-[16px] leading-relaxed">
@@ -1271,8 +1371,19 @@ function MyRoad({
                 key={p.id}
                 className="flex items-baseline gap-3 border-b border-[var(--border)] py-3"
               >
-                <span className="min-w-0 flex-1">
+                {/* The row IS the replay door: tap the song, it plays
+                    again. Remove is a sibling button, never nested, so
+                    removing a play can't start one. */}
+                <button
+                  type="button"
+                  onClick={() => onPlayTrack(p.trackTitle, p.project)}
+                  aria-label={`Play ${p.trackTitle} again`}
+                  className="min-w-0 flex-1 text-left"
+                >
                   <span className="block break-words text-[16px] font-medium leading-snug">
+                    <span aria-hidden className="mr-2 text-[var(--accent)]">
+                      ▶
+                    </span>
                     {p.trackTitle}
                   </span>
                   <span className="font-data block text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
@@ -1280,7 +1391,7 @@ function MyRoad({
                     {p.finished ? "finished" : "partial"} · +{fmtPts2(p.points)} pts ·{" "}
                     {new Date(p.playedAt).toLocaleDateString()}
                   </span>
-                </span>
+                </button>
                 <button
                   type="button"
                   aria-label={`Remove the play of ${p.trackTitle} from ${new Date(p.playedAt).toLocaleDateString()}`}
