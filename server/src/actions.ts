@@ -286,7 +286,7 @@ async function listenerAggregates(db: Db, listenerId: number) {
     .select({
       creditedSec: sql<number>`coalesce(sum(${schema.plays.creditedSec}), 0)`,
       finishes: sql<number>`coalesce(sum(case when ${schema.plays.finished} = 1 then 1 else 0 end), 0)`,
-      depth: sql<number>`count(distinct case when ${schema.plays.finished} = 1 then ${schema.plays.trackTitle} end)`,
+      depth: sql<number>`count(distinct case when ${schema.plays.finished} = 1 then ${schema.plays.trackTitle} || char(31) || ${schema.plays.project} end)`,
       plays: sql<number>`count(*)`,
     })
     .from(schema.plays)
@@ -499,8 +499,13 @@ export const Actions = {
       }
       credited = Math.min(credited, args.listenedSec);
 
-      const finished =
-        args.naturalEnd || args.listenedSec >= 0.9 * args.durationSec ? 1 : 0;
+      // A finish is judged on CREDITED seconds, never the raw claim
+      // (nerf patch, owner's order 2026-11-09): the old code read
+      // args.listenedSec, so a play whose claim the window clamp had
+      // already cut to near zero still banked the finish, the streak,
+      // the first-listen bonus and depth. Credited is what survived
+      // the wall clock; only that can finish a track.
+      const finished = credited >= 0.9 * args.durationSec ? 1 : 0;
       const dayKey = DAY_KEY_RE.test(args.dayKey)
         ? args.dayKey
         : keyFromMs(now);
@@ -555,7 +560,14 @@ export const Actions = {
             ),
           )
           .limit(1);
-        if (prior.length === 0) firstListenPts = 25;
+        // The +25 pays for actually hearing a new track, not for a
+        // credited sliver of one: require 30 credited seconds or half
+        // the track, whichever is less (short tracks stay earnable).
+        if (
+          prior.length === 0 &&
+          credited >= Math.min(30, 0.5 * args.durationSec)
+        )
+          firstListenPts = 25;
       }
 
       // Session bookkeeping (eligible seconds in the current session).
@@ -591,6 +603,7 @@ export const Actions = {
             and(
               eq(schema.plays.listenerId, listener.id),
               eq(schema.plays.trackTitle, args.trackTitle),
+              eq(schema.plays.project, args.project),
               eq(schema.plays.finished, 1),
             ),
           )
@@ -737,7 +750,7 @@ export const Actions = {
           listenerId: schema.plays.listenerId,
           creditedSec: sql<number>`coalesce(sum(${schema.plays.creditedSec}), 0)`,
           finishes: sql<number>`coalesce(sum(case when ${schema.plays.finished} = 1 then 1 else 0 end), 0)`,
-          depth: sql<number>`count(distinct case when ${schema.plays.finished} = 1 then ${schema.plays.trackTitle} end)`,
+          depth: sql<number>`count(distinct case when ${schema.plays.finished} = 1 then ${schema.plays.trackTitle} || char(31) || ${schema.plays.project} end)`,
           plays: sql<number>`count(*)`,
         })
         .from(schema.plays)
