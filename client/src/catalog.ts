@@ -2,7 +2,7 @@
 // THE CATALOG — the player's whole library lives in this one array.
 //
 // Shape: { title, project, src, durationSec }.
-// The real catalog (owner's catalog pass, 2026-11-08): 1,473 tracks across
+// The real catalog (owner's catalog pass, 2026-11-08): 1,468 tracks across
 // 113 projects, generated from the live R2 bucket listing (catalog.json).
 // Each entry's src is the public R2 stream URL from that file, verbatim.
 // durationSec is the file's measured durSec; where the file has null
@@ -587,10 +587,6 @@ export const CATALOG: CatalogTrack[] = [
   {"title": "04 Enter the Hamilton 1", "project": "Billy's Mom", "src": "https://pub-195ce558feac44c5bd3f019b9265b6de.r2.dev/Billy%27s%20Mom/04%20Enter%20the%20Hamilton%201.mp3", "durationSec": 290},
   {"title": "05 The Scout", "project": "Billy's Mom", "src": "https://pub-195ce558feac44c5bd3f019b9265b6de.r2.dev/Billy%27s%20Mom/05%20The%20Scout.mp3", "durationSec": 276},
   {"title": "06 Musician's Ambition 1", "project": "Billy's Mom", "src": "https://pub-195ce558feac44c5bd3f019b9265b6de.r2.dev/Billy%27s%20Mom/06%20Musician%27s%20Ambition%201.mp3", "durationSec": 292},
-  {"title": "._01 Go To Hell", "project": "Bitch_", "src": "https://pub-195ce558feac44c5bd3f019b9265b6de.r2.dev/Bitch_/._01%20Go%20To%20Hell.mp3", "durationSec": 228},
-  {"title": "._05 Freakbitch", "project": "Bitch_", "src": "https://pub-195ce558feac44c5bd3f019b9265b6de.r2.dev/Bitch_/._05%20Freakbitch.mp3", "durationSec": 280},
-  {"title": "._06 Exotic Bitch", "project": "Bitch_", "src": "https://pub-195ce558feac44c5bd3f019b9265b6de.r2.dev/Bitch_/._06%20Exotic%20Bitch.mp3", "durationSec": 272},
-  {"title": "._07 Familiar Bitch", "project": "Bitch_", "src": "https://pub-195ce558feac44c5bd3f019b9265b6de.r2.dev/Bitch_/._07%20Familiar%20Bitch.mp3", "durationSec": 272},
   {"title": "01 Go To Hell", "project": "Bitch_", "src": "https://pub-195ce558feac44c5bd3f019b9265b6de.r2.dev/Bitch_/01%20Go%20To%20Hell.mp3", "durationSec": 254},
   {"title": "02 Not Now (Difficult)", "project": "Bitch_", "src": "https://pub-195ce558feac44c5bd3f019b9265b6de.r2.dev/Bitch_/02%20Not%20Now%20%28Difficult%29.mp3", "durationSec": 246},
   {"title": "03 Shut Up", "project": "Bitch_", "src": "https://pub-195ce558feac44c5bd3f019b9265b6de.r2.dev/Bitch_/03%20Shut%20Up.mp3", "durationSec": 252},
@@ -1272,7 +1268,6 @@ export const CATALOG: CatalogTrack[] = [
   {"title": "Bright Side of The Sun/_Pre-Suicide-Not", "project": "DOOM Williams!", "src": "https://pub-195ce558feac44c5bd3f019b9265b6de.r2.dev/DOOM%20Williams%21/Bright%20Side%20of%20The%20Sun/_Pre-Suicide-Not.mp3", "durationSec": 297},
   {"title": "Darth the Hamilton/He-Has-Nothing", "project": "DOOM Williams!", "src": "https://pub-195ce558feac44c5bd3f019b9265b6de.r2.dev/DOOM%20Williams%21/Darth%20the%20Hamilton/He-Has-Nothing.mp3", "durationSec": 317},
   {"title": "Darth the Hamilton/Meet the Villain (DOOM Williams intro)", "project": "DOOM Williams!", "src": "https://pub-195ce558feac44c5bd3f019b9265b6de.r2.dev/DOOM%20Williams%21/Darth%20the%20Hamilton/Meet%20the%20Villain%20%28DOOM%20Williams%20intro%29.mp3", "durationSec": 270},
-  {"title": "Darth the Hamilton/Meet the Villain---12-1-21--7-29-PM", "project": "DOOM Williams!", "src": "https://pub-195ce558feac44c5bd3f019b9265b6de.r2.dev/DOOM%20Williams%21/Darth%20the%20Hamilton/Meet%20the%20Villain---12-1-21--7-29-PM.mp3", "durationSec": 270},
   {"title": "Darth the Hamilton/Metal-Holyghost", "project": "DOOM Williams!", "src": "https://pub-195ce558feac44c5bd3f019b9265b6de.r2.dev/DOOM%20Williams%21/Darth%20the%20Hamilton/Metal-Holyghost.mp3", "durationSec": 294},
   {"title": "Darth the Hamilton/Nathan ButPenetration", "project": "DOOM Williams!", "src": "https://pub-195ce558feac44c5bd3f019b9265b6de.r2.dev/DOOM%20Williams%21/Darth%20the%20Hamilton/Nathan%20ButPenetration.mp3", "durationSec": 353},
   {"title": "Darth the Hamilton/Theme From CHtSkywalker-", "project": "DOOM Williams!", "src": "https://pub-195ce558feac44c5bd3f019b9265b6de.r2.dev/DOOM%20Williams%21/Darth%20the%20Hamilton/Theme%20From%20CHtSkywalker-.mp3", "durationSec": 239},
