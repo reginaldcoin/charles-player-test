@@ -314,6 +314,7 @@ const listenerPublic = z.object({
   id: z.number(),
   name: z.string(),
   code: z.string(),
+  bugHunter: z.boolean(),
 });
 
 const claimResponse = z.object({
@@ -522,7 +523,7 @@ export const Actions = {
           ok: true,
           created: false,
           error: null,
-          listener: { id: found.id, name: found.name, code: found.code },
+          listener: { id: found.id, name: found.name, code: found.code, bugHunter: found.bugHunter === 1 },
           token,
         };
       }
@@ -552,7 +553,7 @@ export const Actions = {
         ok: true,
         created: true,
         error: null,
-        listener: { id: row.id, name, code },
+        listener: { id: row.id, name, code, bugHunter: false },
         token,
       };
     },
@@ -921,6 +922,7 @@ export const Actions = {
           id: z.number(),
           name: z.string(),
           code: z.string(),
+          bugHunter: z.boolean(),
           score: z.number(),
           minutes: z.number(),
           finishes: z.number(),
@@ -958,6 +960,7 @@ export const Actions = {
             id: l.id,
             name: l.name,
             code: l.code,
+            bugHunter: l.bugHunter === 1,
             score: round2(stateById.get(l.id)?.score ?? 0),
             minutes: Math.floor((agg?.creditedSec ?? 0) / 60),
             finishes: agg?.finishes ?? 0,
@@ -987,6 +990,7 @@ export const Actions = {
           id: r.id,
           name: r.name,
           code: r.code,
+          bugHunter: r.bugHunter,
           score: r.score,
           minutes: r.minutes,
           finishes: r.finishes,
@@ -1204,7 +1208,7 @@ export const Actions = {
       return {
         ok: true,
         error: null,
-        listener: { id: listener.id, name: listener.name, code: listener.code },
+        listener: { id: listener.id, name: listener.name, code: listener.code, bugHunter: listener.bugHunter === 1 },
         rank,
         score: round2(state.score),
         minutes: Math.floor(agg.creditedSec / 60),
@@ -1565,6 +1569,47 @@ export const Actions = {
         newScore: result.score,
         plays: result.plays,
       };
+    },
+  }),
+
+  setBugHunter: defineAction({
+    description:
+      "Operators only: grants or removes a listener's bug-hunter flair (the little pixel bug beside their name). Granted, never claimed; no session is rotated.",
+    request: z.object({
+      token: z.string().min(1),
+      code: z.string().min(1).max(64),
+      on: z.boolean(),
+    }),
+    response: z.object({
+      ok: z.boolean(),
+      error: z.string().nullable(),
+      listener: z.string().nullable(),
+      bugHunter: z.boolean().nullable(),
+    }),
+    async handler(ctx, args) {
+      const db = ctx.db<typeof schema>();
+      const me = await resolveListener(db, args.token);
+      if (!me) {
+        return { ok: false, error: "Not signed in.", listener: null, bugHunter: null };
+      }
+      if (!OPERATOR_CODES.includes(me.code)) {
+        return { ok: false, error: "Only the operators can grant the bug.", listener: null, bugHunter: null };
+      }
+      const targets = await db
+        .select()
+        .from(schema.listeners)
+        .where(eq(schema.listeners.code, args.code))
+        .limit(1);
+      const target = targets[0];
+      if (!target) {
+        return { ok: false, error: "No listener carries that !code.", listener: null, bugHunter: null };
+      }
+      await db
+        .update(schema.listeners)
+        .set({ bugHunter: args.on ? 1 : 0 })
+        .where(eq(schema.listeners.id, target.id));
+      ctx.invalidateQueries();
+      return { ok: true, error: null, listener: target.name, bugHunter: args.on };
     },
   }),
 } satisfies ActionsModule;

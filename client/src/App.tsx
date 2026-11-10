@@ -40,6 +40,32 @@ function TripCode({ code }: { code: string }) {
   return <span className="trip">!{code}</span>;
 }
 
+/** Bug-hunter flair: a little pixel bug, granted by the operators. */
+function BugGlyph() {
+  const green = "#4ade80";
+  const dark = "#14532d";
+  return (
+    <span title="Bug hunter" className="ml-1 inline-flex align-[-2px]">
+      <svg viewBox="0 0 10 10" shapeRendering="crispEdges" aria-hidden className="h-[13px] w-[13px]">
+        <rect x="2" y="0" width="1" height="1" fill={green} />
+        <rect x="7" y="0" width="1" height="1" fill={green} />
+        <rect x="3" y="1" width="1" height="1" fill={green} />
+        <rect x="6" y="1" width="1" height="1" fill={green} />
+        <rect x="4" y="1" width="2" height="2" fill={green} />
+        <rect x="1" y="4" width="2" height="1" fill={green} />
+        <rect x="7" y="4" width="2" height="1" fill={green} />
+        <rect x="1" y="6" width="2" height="1" fill={green} />
+        <rect x="7" y="6" width="2" height="1" fill={green} />
+        <rect x="1" y="8" width="2" height="1" fill={green} />
+        <rect x="7" y="8" width="2" height="1" fill={green} />
+        <rect x="3" y="3" width="4" height="6" fill={green} />
+        <rect x="3" y="5" width="4" height="1" fill={dark} />
+        <rect x="3" y="7" width="4" height="1" fill={dark} />
+      </svg>
+    </span>
+  );
+}
+
 /** Charles's birthday: November 10, viewer-local. */
 function isCharlesBirthday(d: Date): boolean {
   return d.getMonth() === 10 && d.getDate() === 10;
@@ -239,6 +265,7 @@ interface Identity {
   id: number;
   name: string;
   code: string;
+  bugHunter?: boolean;
   token: string;
 }
 
@@ -1179,6 +1206,7 @@ export function App() {
                 Listening as{" "}
                 <span className="text-[var(--text)]">
                   {identity.name} <TripCode code={identity.code} />
+                  {identity.bugHunter && <BugGlyph />}
                 </span>{" "}
                 —{" "}
                 {sessionStale ? (
@@ -1404,6 +1432,7 @@ function Standings({
                   <span className="font-data text-[16px] text-[var(--dim)]">
                     <TripCode code={top.code} />
                   </span>
+                  {top.bugHunter && <BugGlyph />}
                 </p>
                 <p className="font-pixel mt-3 text-[54px] leading-[1.2] text-[var(--accent)]">
                   {fmtPts1(top.score)}
@@ -1439,6 +1468,7 @@ function Standings({
                       <span className="font-data text-[11px] text-[var(--dim)]">
                         <TripCode code={l.code} />
                       </span>
+                      {l.bugHunter && <BugGlyph />}
                     </span>
                     <span className="font-data block text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
                       {l.minutes} min · {l.finishes} fin · {l.depth} deep
@@ -1489,6 +1519,7 @@ function ClaimPanel({
           id: res.listener.id,
           name: res.listener.name,
           code: res.listener.code,
+          bugHunter: res.listener.bugHunter,
           token: res.token,
         });
       } else {
@@ -1697,6 +1728,7 @@ function MyRoad({
             <span className="font-data text-[11px] text-[var(--dim)]">
               <TripCode code={identity.code} />
             </span>
+            {(data.listener?.bugHunter ?? identity.bugHunter) && <BugGlyph />}
           </p>
           <p className="font-data mt-1 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
             {fmtPts2(data.score)} points · {data.minutes} minutes · {data.finishes}{" "}

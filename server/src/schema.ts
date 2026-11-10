@@ -22,6 +22,8 @@ export const listeners = sqliteTable("listeners", {
   nameKey: text("name_key").notNull().unique(),
   // Public !code shown beside the name. Random at claim time.
   code: text("code").notNull(),
+  // Bug-hunter flair: 1 when the operators have granted the pixel bug.
+  bugHunter: integer("bug_hunter").notNull().default(0),
   pwHash: text("pw_hash").notNull(),
   pwAlgo: text("pw_algo").notNull(),
   createdAt: integer("created_at", { mode: "timestamp_ms" })
