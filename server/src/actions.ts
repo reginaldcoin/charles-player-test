@@ -1040,6 +1040,70 @@ export const Actions = {
     },
   }),
 
+  getLoveBoard: defineAction({
+    description:
+      "Returns MOST LOVED: songs ranked by hearts received. Public and anonymous — only track identities and counts, never who hearted what.",
+    request: z.object({}),
+    response: z.object({
+      tracks: z.array(
+        z.object({
+          rank: z.number(),
+          title: z.string(),
+          project: z.string(),
+          hearts: z.number(),
+          durationSec: z.number(),
+        }),
+      ),
+      totalHearts: z.number(),
+    }),
+    async handler(ctx) {
+      const db = ctx.db<typeof schema>();
+      // The favorites primary key is (listener_id, track_title, project),
+      // so every row is already one listener's one heart for that track;
+      // COUNT(*) therefore counts distinct listeners by construction.
+      const rows = await db
+        .select({
+          title: schema.favorites.trackTitle,
+          project: schema.favorites.project,
+          hearts: sql<number>`count(*)`,
+        })
+        .from(schema.favorites)
+        .groupBy(schema.favorites.trackTitle, schema.favorites.project)
+        .orderBy(
+          desc(sql`count(*)`),
+          asc(schema.favorites.trackTitle),
+          asc(schema.favorites.project),
+        )
+        .limit(25);
+
+      const durations = await db
+        .select({
+          title: schema.plays.trackTitle,
+          project: schema.plays.project,
+          durationSec: sql<number>`max(${schema.plays.durationSec})`,
+        })
+        .from(schema.plays)
+        .groupBy(schema.plays.trackTitle, schema.plays.project);
+      const durationByTrack = new Map(
+        durations.map((d) => [`${d.title}\u001f${d.project}`, Math.round(d.durationSec)]),
+      );
+      const totals = await db
+        .select({ totalHearts: sql<number>`count(*)` })
+        .from(schema.favorites);
+
+      return {
+        tracks: rows.map((r, i) => ({
+          rank: i + 1,
+          title: r.title,
+          project: r.project,
+          hearts: r.hearts,
+          durationSec: durationByTrack.get(`${r.title}\u001f${r.project}`) ?? 0,
+        })),
+        totalHearts: totals[0]?.totalHearts ?? 0,
+      };
+    },
+  }),
+
   getMyRoad: defineAction({
     description:
       "Returns one signed-in listener's road: rank, gap to the listener above, milestone progress, streaks, today's cap usage, and recent plays.",

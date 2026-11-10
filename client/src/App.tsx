@@ -156,6 +156,27 @@ const HEART_SPARKS = [
   { dx: 49, dy: -28, size: 6, color: "#fde047" },
 ];
 
+/** The drawn heart on its own, for counts and shelves (static: no burst). */
+function HeartIcon({ size = 18 }: { size?: number }) {
+  return (
+    <svg
+      className="block shrink-0"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      aria-hidden
+    >
+      <path
+        d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"
+        fill="#ff69b4"
+        stroke="#ffffff"
+        strokeWidth={1.8}
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 /**
  * The heart, drawn not typed: an SVG silhouette (Press Start 2P has no
  * heart glyph, so the old text heart fell back to a tiny system glyph
@@ -341,6 +362,7 @@ function loadIdentity(): Identity | null {
 type View = "player" | "standings" | "road" | "backroom";
 
 type BoardData = ApiResponse<typeof api, "getBoard">;
+type LoveBoardData = ApiResponse<typeof api, "getLoveBoard">;
 type RoadData = ApiResponse<typeof api, "getMyRoad">;
 type TrackBoardData = ApiResponse<typeof api, "getTrackBoard">;
 
@@ -472,6 +494,7 @@ export function App() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["road"] });
       void queryClient.invalidateQueries({ queryKey: ["hearts-today"] });
+      void queryClient.invalidateQueries({ queryKey: ["love-board"] });
     },
   });
   const nowHearted =
@@ -1450,7 +1473,11 @@ export function App() {
 
         {/* =========================== STANDINGS =========================== */}
         {view === "standings" && (
-          <Standings identity={identity} onClaim={() => setView("road")} />
+          <Standings
+            identity={identity}
+            onClaim={() => setView("road")}
+            onPlayTrack={playRecent}
+          />
         )}
 
         {/* ============================= MY ROAD ============================= */}
@@ -1532,13 +1559,20 @@ export function App() {
 function Standings({
   identity,
   onClaim,
+  onPlayTrack,
 }: {
   identity: Identity | null;
   onClaim: () => void;
+  onPlayTrack: (trackTitle: string, project: string) => void;
 }) {
   const board = useQuery({
     queryKey: ["board"],
     queryFn: () => api.getBoard({}),
+    refetchInterval: 30000,
+  });
+  const love = useQuery({
+    queryKey: ["love-board"],
+    queryFn: () => api.getLoveBoard({}),
     refetchInterval: 30000,
   });
 
@@ -1702,6 +1736,137 @@ function Standings({
             {data.totals.minutes} minutes · {data.totals.finishes} finishes,
             all time
           </p>
+        </>
+      )}
+
+      {love.data && (
+        <MostLoved data={love.data} onPlayTrack={onPlayTrack} />
+      )}
+    </section>
+  );
+}
+
+function MostLoved({
+  data,
+  onPlayTrack,
+}: {
+  data: LoveBoardData;
+  onPlayTrack: (trackTitle: string, project: string) => void;
+}) {
+  const top = data.tracks[0];
+  const rest = data.tracks.slice(1);
+  const canPlay = (title: string, project: string) =>
+    CATALOG.some((t) => t.title === title && t.project === project);
+
+  return (
+    <section aria-label="Most Loved" className="mt-6">
+      <div className="px-4">
+        <div className="nes-container with-title px-4 py-3">
+          <h3 className="title column-title font-pixel text-[11px]">
+            MOST LOVED
+          </h3>
+          <p className="font-data text-[11px] uppercase leading-relaxed tracking-[0.12em] text-[var(--dim)]">
+            Ranked by hearts.
+          </p>
+        </div>
+      </div>
+
+      {data.tracks.length === 0 ? (
+        <p className="px-4 py-8 text-base leading-relaxed">
+          No hearts yet. Tap the heart on a song you love.
+        </p>
+      ) : (
+        <>
+          {top && (
+            <div className="px-4 pt-4">
+              <div className="nes-container with-title relative px-5 pb-5 pt-4">
+                <p className="title font-pixel text-[11px]">№ 1</p>
+                {canPlay(top.title, top.project) ? (
+                  <button
+                    type="button"
+                    onClick={() => onPlayTrack(top.title, top.project)}
+                    className="block w-full text-left"
+                    aria-label={`Play ${top.title}`}
+                  >
+                    <span className="mt-3 block break-words text-[24px] font-semibold leading-relaxed">
+                      {top.title}
+                    </span>
+                    <span className="font-data mt-1 block text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+                      {top.project}
+                      {top.durationSec > 0 && ` · ${fmtTime(top.durationSec)}`}
+                    </span>
+                    <span className="mt-3 flex items-center gap-3">
+                      <HeartIcon size={32} />
+                      <span className="font-pixel text-[36px] leading-none text-[var(--accent)]">
+                        {top.hearts}
+                      </span>
+                    </span>
+                  </button>
+                ) : (
+                  <>
+                    <p className="mt-3 break-words text-[24px] font-semibold leading-relaxed">
+                      {top.title}
+                    </p>
+                    <p className="font-data mt-1 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+                      {top.project}
+                      {top.durationSec > 0 && ` · ${fmtTime(top.durationSec)}`}
+                    </p>
+                    <p className="mt-3 flex items-center gap-3">
+                      <HeartIcon size={32} />
+                      <span className="font-pixel text-[36px] leading-none text-[var(--accent)]">
+                        {top.hearts}
+                      </span>
+                    </p>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+
+          <ol className="mt-4">
+            {rest.map((t) => {
+              const playable = canPlay(t.title, t.project);
+              const body = (
+                <>
+                  <span className="font-pixel w-[44px] shrink-0 text-[20px]">
+                    {t.rank}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block break-words text-[16px] font-medium leading-snug">
+                      {t.title}
+                    </span>
+                    <span className="font-data block text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+                      {t.project}
+                      {t.durationSec > 0 && ` · ${fmtTime(t.durationSec)}`}
+                    </span>
+                  </span>
+                  <span className="flex shrink-0 items-center gap-2">
+                    <HeartIcon size={18} />
+                    <span className="font-pixel text-[18px]">{t.hearts}</span>
+                  </span>
+                </>
+              );
+              return (
+                <li
+                  key={`${t.title}\u001f${t.project}`}
+                  className="border-b border-[var(--border)] px-4 py-3"
+                >
+                  {playable ? (
+                    <button
+                      type="button"
+                      onClick={() => onPlayTrack(t.title, t.project)}
+                      className="flex w-full items-center gap-4 text-left"
+                      aria-label={`Play ${t.title}`}
+                    >
+                      {body}
+                    </button>
+                  ) : (
+                    <div className="flex items-center gap-4">{body}</div>
+                  )}
+                </li>
+              );
+            })}
+          </ol>
         </>
       )}
     </section>
@@ -1882,6 +2047,7 @@ function MyRoad({
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["road"] });
       void queryClient.invalidateQueries({ queryKey: ["hearts-today"] });
+      void queryClient.invalidateQueries({ queryKey: ["love-board"] });
     },
   });
 
