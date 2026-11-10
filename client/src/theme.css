@@ -75,6 +75,11 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* A listener's public !code: classic tripcode green, names untouched. */
+.trip {
+  color: #789922;
+}
+
 /* --- charleshamilton.app's own custom layer over NES.css ---------------
    Copied from the main site's stylesheet: its button color family, its
    container treatment, its balloon colors, its pink titles and footer. */

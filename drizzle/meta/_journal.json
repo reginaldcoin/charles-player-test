@@ -29,6 +29,13 @@
       "when": 1794173829147,
       "tag": "0004_fractional_points",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1794265800000,
+      "tag": "0005_favorites",
+      "breakpoints": true
     }
   ]
 }

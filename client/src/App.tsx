@@ -28,6 +28,11 @@ function fmtPts1(n: number): string {
   return (isFinite(n) ? n : 0).toFixed(1);
 }
 
+/** A listener's public !code, in classic tripcode green. */
+function TripCode({ code }: { code: string }) {
+  return <span className="trip">!{code}</span>;
+}
+
 function localDayKey(d: Date): string {
   const p = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
@@ -99,6 +104,12 @@ export function App() {
   const listenedRef = useRef(0);
   const lastTimeRef = useRef(0);
   const failStreakRef = useRef(0);
+  // Stall watchdog: last position the audio clock actually reached, the
+  // wall time it got there, and how many recoveries this track has had.
+  const lastProgressRef = useRef(0);
+  const lastProgressAtRef = useRef(0);
+  const stallAttemptsRef = useRef(0);
+  const stallHintRef = useRef(false);
   const sessionIdRef = useRef<string>(newSessionId());
   const sessionListenedRef = useRef(0);
   const sessionFinishesRef = useRef(0);
@@ -126,6 +137,33 @@ export function App() {
   const [hasPrev, setHasPrev] = useState(false);
 
   const nowTrack = nowIdx >= 0 ? CATALOG[nowIdx] : undefined;
+
+  // Hearts, read side: the road query doubles as the favorites source
+  // (same cache key MyRoad uses), so the now-playing heart knows its
+  // state without a second endpoint. Guests skip it entirely.
+  const roadLite = useQuery({
+    queryKey: ["road", identity?.id],
+    queryFn: () =>
+      api.getMyRoad({
+        token: identity!.token,
+        catalogSize: CATALOG.length,
+        todayKey: localDayKey(new Date()),
+      }),
+    enabled: !!identity,
+    refetchInterval: 30000,
+  });
+  const heartNow = useMutation({
+    mutationFn: (args: { trackTitle: string; project: string }) =>
+      api.toggleFavorite({ token: identityRef.current!.token, ...args }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["road"] });
+    },
+  });
+  const nowHearted =
+    !!nowTrack &&
+    !!roadLite.data?.favorites.some(
+      (f) => f.trackTitle === nowTrack.title && f.project === nowTrack.project,
+    );
 
   // --- Wake lock ---------------------------------------------------------------
   const requestWakeLock = useCallback(async () => {
@@ -285,6 +323,10 @@ export function App() {
       currentRef.current = idx;
       listenedRef.current = 0;
       lastTimeRef.current = 0;
+      lastProgressRef.current = 0;
+      lastProgressAtRef.current = Date.now();
+      stallAttemptsRef.current = 0;
+      stallHintRef.current = false;
       setNowIdx(idx);
       setTrackClock({ elapsed: 0, duration: tr.durationSec ?? 0 });
       tapeRef.current?.markChange();
@@ -332,6 +374,17 @@ export function App() {
     });
     audio.addEventListener("play", () => setIsPlaying(true));
     audio.addEventListener("pause", () => setIsPlaying(false));
+    audio.addEventListener("playing", () => {
+      // Real motion again: the watchdog stands down for this track.
+      stallAttemptsRef.current = 0;
+      stallHintRef.current = false;
+      lastProgressAtRef.current = Date.now();
+    });
+    const onStallHint = () => {
+      stallHintRef.current = true;
+    };
+    audio.addEventListener("stalled", onStallHint);
+    audio.addEventListener("waiting", onStallHint);
     audioRef.current = audio;
     try {
       if ("mediaSession" in navigator) {
@@ -501,6 +554,44 @@ export function App() {
           sessionListenedRef.current += d;
         }
         lastTimeRef.current = ct;
+        // Stall watchdog: the track should be moving. If the position
+        // has not advanced for seconds while the element says it lacks
+        // data, the stream has wedged — re-open it at the last known
+        // position. Three tries per track, then the error path takes
+        // it. A user pause never reaches here (paused branch above).
+        if (ct > lastProgressRef.current + 0.05) {
+          lastProgressRef.current = ct;
+          lastProgressAtRef.current = Date.now();
+          stallHintRef.current = false;
+        } else if (
+          currentRef.current >= 0 &&
+          audio.readyState < 3 &&
+          Date.now() - lastProgressAtRef.current >
+            (stallHintRef.current ? 3000 : 6000)
+        ) {
+          lastProgressAtRef.current = Date.now();
+          if (stallAttemptsRef.current >= 3) {
+            stallAttemptsRef.current = 0;
+            handleTrackError();
+          } else {
+            stallAttemptsRef.current += 1;
+            const tr = CATALOG[currentRef.current];
+            if (tr) {
+              const pos = lastProgressRef.current;
+              const resume = () => {
+                try {
+                  audio.currentTime = pos;
+                } catch {
+                  // Not seekable yet: play from wherever it lands.
+                }
+                audio.removeEventListener("loadedmetadata", resume);
+              };
+              audio.addEventListener("loadedmetadata", resume);
+              audio.src = tr.src;
+              void audio.play().catch(() => undefined);
+            }
+          }
+        }
       } else {
         lastTimeRef.current = audio.currentTime;
       }
@@ -616,14 +707,14 @@ export function App() {
       {/* Masthead — an NES container title bar: the site's own frame */}
       <header className="px-4 pt-4">
         <div className="nes-container with-title px-4 py-3">
-          <p className="title font-pixel text-[11px]">PLAYER</p>
+          <p className="title font-pixel text-[11px]">ZONE 00</p>
           <div className="flex items-stretch justify-between gap-3">
             <div>
               <p className="font-pixel text-[20px] leading-relaxed sm:text-[24px]">
                 CHARLES HAMILTON
               </p>
               <p className="font-data mt-2 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
-                The endless player · charleshamilton.app
+                ZONE 00 · the endless player
               </p>
             </div>
             <div className="chrome flex shrink-0 items-center gap-2">
@@ -687,7 +778,7 @@ export function App() {
               <button
                 type="button"
                 onClick={startPlayback}
-                aria-label="Play: start the endless player"
+                aria-label="Play: start ZONE 00"
                 className="absolute inset-0 flex w-full items-center justify-center bg-[var(--bg)]/85"
               >
                 <span className="nes-btn is-pink px-8 py-6 text-center">
@@ -707,9 +798,33 @@ export function App() {
             <p className="font-data text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
               {nowTrack ? `Now playing · ${nowTrack.project}` : "Now playing"}
             </p>
-            <h1 className="font-pixel mt-3 break-words text-[30px] leading-[1.15] sm:text-[54px]">
-              {nowTrack ? nowTrack.title.toUpperCase() : "—"}
-            </h1>
+            <div className="mt-3 flex items-start justify-between gap-3">
+              <h1 className="font-pixel break-words text-[30px] leading-[1.15] sm:text-[54px]">
+                {nowTrack ? nowTrack.title.toUpperCase() : "—"}
+              </h1>
+              {identity && nowTrack && (
+                <button
+                  type="button"
+                  aria-label={
+                    nowHearted
+                      ? `Unheart ${nowTrack.title}`
+                      : `Heart ${nowTrack.title}`
+                  }
+                  aria-pressed={nowHearted}
+                  onClick={() =>
+                    heartNow.mutate({
+                      trackTitle: nowTrack.title,
+                      project: nowTrack.project,
+                    })
+                  }
+                  disabled={heartNow.isPending}
+                  className="shrink-0 px-2 py-1 text-[28px] leading-none disabled:opacity-40"
+                  style={nowHearted ? { color: "var(--accent)" } : undefined}
+                >
+                  {nowHearted ? "♥" : "♡"}
+                </button>
+              )}
+            </div>
             {/* Progress: a hard-edged block bar, no knob */}
             <div
               className="mt-4 h-[12px] w-full border border-[var(--border)]"
@@ -808,7 +923,7 @@ export function App() {
               <p className="font-data text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
                 Listening as{" "}
                 <span className="text-[var(--text)]">
-                  {identity.name} !{identity.code}
+                  {identity.name} <TripCode code={identity.code} />
                 </span>{" "}
                 — every finish reports to the board.
               </p>
@@ -858,7 +973,7 @@ export function App() {
       >
         {(
           [
-            ["player", "PLAYER"],
+            ["player", "ZONE 00"],
             ["standings", "STANDINGS"],
             ["road", "MY ROAD"],
           ] as [View, string][]
@@ -1010,7 +1125,7 @@ function Standings({
                 <p className="mt-3 break-words text-[24px] font-semibold leading-relaxed">
                   {top.name}{" "}
                   <span className="font-data text-[16px] text-[var(--dim)]">
-                    !{top.code}
+                    <TripCode code={top.code} />
                   </span>
                 </p>
                 <p className="font-pixel mt-3 text-[54px] leading-[1.2] text-[var(--accent)]">
@@ -1045,7 +1160,7 @@ function Standings({
                     <span className="block break-words text-[16px] font-medium leading-snug">
                       {l.name}{" "}
                       <span className="font-data text-[11px] text-[var(--dim)]">
-                        !{l.code}
+                        <TripCode code={l.code} />
                       </span>
                     </span>
                     <span className="font-data block text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
@@ -1217,6 +1332,14 @@ function MyRoad({
     },
   });
 
+  const heart = useMutation({
+    mutationFn: (args: { trackTitle: string; project: string }) =>
+      api.toggleFavorite({ token: identity.token, ...args }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["road"] });
+    },
+  });
+
   if (road.isPending) {
     return (
       <section aria-label="My road" className="px-4 py-10">
@@ -1273,7 +1396,7 @@ function MyRoad({
           <p className="mt-3 text-[16px] leading-relaxed">
             {identity.name}{" "}
             <span className="font-data text-[11px] text-[var(--dim)]">
-              !{identity.code}
+              <TripCode code={identity.code} />
             </span>
           </p>
           <p className="font-data mt-1 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
@@ -1394,12 +1517,84 @@ function MyRoad({
                 </button>
                 <button
                   type="button"
+                  aria-label={
+                    p.hearted
+                      ? `Unheart ${p.trackTitle}`
+                      : `Heart ${p.trackTitle}`
+                  }
+                  aria-pressed={p.hearted}
+                  onClick={() =>
+                    heart.mutate({
+                      trackTitle: p.trackTitle,
+                      project: p.project,
+                    })
+                  }
+                  disabled={heart.isPending}
+                  className="shrink-0 px-2 py-2 text-[18px] leading-none disabled:opacity-40"
+                  style={p.hearted ? { color: "var(--accent)" } : undefined}
+                >
+                  {p.hearted ? "♥" : "♡"}
+                </button>
+                <button
+                  type="button"
                   aria-label={`Remove the play of ${p.trackTitle} from ${new Date(p.playedAt).toLocaleDateString()}`}
                   onClick={() => del.mutate(p.id)}
                   disabled={del.isPending}
                   className="font-data shrink-0 px-2 py-2 text-[11px] uppercase tracking-[0.12em] underline underline-offset-4 disabled:opacity-40"
                 >
                   Remove
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        {/* Your hearts — the shelf of hearted songs, playable in place */}
+        <h3 className="column-title font-pixel mt-8 text-[20px] leading-relaxed">
+          YOUR HEARTS
+        </h3>
+        {data.favorites.length === 0 ? (
+          <p className="mt-3 text-base leading-relaxed">
+            Nothing hearted yet.
+          </p>
+        ) : (
+          <ul>
+            {data.favorites.map((f) => (
+              <li
+                key={`${f.trackTitle}::${f.project}`}
+                className="flex items-baseline gap-3 border-b border-[var(--border)] py-3"
+              >
+                <button
+                  type="button"
+                  onClick={() => onPlayTrack(f.trackTitle, f.project)}
+                  aria-label={`Play ${f.trackTitle}`}
+                  className="min-w-0 flex-1 text-left"
+                >
+                  <span className="block break-words text-[16px] font-medium leading-snug">
+                    <span aria-hidden className="mr-2 text-[var(--accent)]">
+                      ▶
+                    </span>
+                    {f.trackTitle}
+                  </span>
+                  <span className="font-data block text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+                    {f.project} · hearted{" "}
+                    {new Date(f.heartedAt).toLocaleDateString()}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  aria-label={`Unheart ${f.trackTitle}`}
+                  aria-pressed={true}
+                  onClick={() =>
+                    heart.mutate({
+                      trackTitle: f.trackTitle,
+                      project: f.project,
+                    })
+                  }
+                  disabled={heart.isPending}
+                  className="shrink-0 px-2 py-2 text-[18px] leading-none disabled:opacity-40"
+                  style={{ color: "var(--accent)" }}
+                >
+                  ♥
                 </button>
               </li>
             ))}

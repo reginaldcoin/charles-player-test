@@ -2,6 +2,7 @@
 //
 // Integration surface (per listeners-board-wiring-spec-2026-11-07.md):
 //   claimName / logPlay / getBoard / getMyRoad / getTrackBoard / deletePlay
+//   plus toggleFavorite (hearts; personal only, never scored)
 // plus signOut for session hygiene.
 //
 // Identity: tripcode-style. A name is claimed WITH a password; the server
@@ -995,6 +996,14 @@ export const Actions = {
           finished: z.boolean(),
           points: z.number(),
           playedAt: z.string(),
+          hearted: z.boolean(),
+        }),
+      ),
+      favorites: z.array(
+        z.object({
+          trackTitle: z.string(),
+          project: z.string(),
+          heartedAt: z.string(),
         }),
       ),
     }),
@@ -1015,6 +1024,7 @@ export const Actions = {
         dayCapSec: DAY_CAP_SEC,
         milestones: [],
         recentPlays: [],
+        favorites: [],
       };
       const listener = await resolveListener(db, args.token);
       if (!listener) return empty;
@@ -1111,12 +1121,34 @@ export const Actions = {
         },
       ];
 
-      const recents = await db
+      // Hearts first, so the history below can mark them.
+      const favRows = await db
+        .select()
+        .from(schema.favorites)
+        .where(eq(schema.favorites.listenerId, listener.id))
+        .orderBy(desc(schema.favorites.createdAt))
+        .limit(200);
+      const heartedKeys = new Set(
+        favRows.map((f) => `${f.trackTitle}\u0001${f.project}`),
+      );
+
+      // History, deduped: fetch deep, then keep the most recent play of
+      // each track (title + project), most-recent-first, capped at 25.
+      const recentRows = await db
         .select()
         .from(schema.plays)
         .where(eq(schema.plays.listenerId, listener.id))
         .orderBy(desc(schema.plays.id))
-        .limit(10);
+        .limit(100);
+      const seenTracks = new Set<string>();
+      const recents = [];
+      for (const p of recentRows) {
+        const key = `${p.trackTitle}\u0001${p.project}`;
+        if (seenTracks.has(key)) continue;
+        seenTracks.add(key);
+        recents.push(p);
+        if (recents.length >= 25) break;
+      }
 
       return {
         ok: true,
@@ -1145,6 +1177,12 @@ export const Actions = {
           finished: p.finished === 1,
           points: round2(p.points),
           playedAt: p.playedAt.toISOString(),
+          hearted: heartedKeys.has(`${p.trackTitle}\u0001${p.project}`),
+        })),
+        favorites: favRows.map((f) => ({
+          trackTitle: f.trackTitle,
+          project: f.project,
+          heartedAt: f.createdAt.toISOString(),
         })),
       };
     },
@@ -1338,6 +1376,50 @@ export const Actions = {
 
       ctx.invalidateQueries();
       return { ok: true, error: null };
+    },
+  }),
+
+  toggleFavorite: defineAction({
+    description:
+      "Hearts or unhearts a track for the signed-in listener. Purely personal: favorites never touch score, state, or plays.",
+    request: z.object({
+      token: z.string().min(1).max(512),
+      trackTitle: z.string().min(1).max(500),
+      project: z.string().min(1).max(500),
+    }),
+    response: z.object({
+      ok: z.boolean(),
+      error: z.string().nullable(),
+      hearted: z.boolean(),
+    }),
+    async handler(ctx, args) {
+      const db = ctx.db<typeof schema>();
+      const listener = await resolveListener(db, args.token);
+      if (!listener) {
+        return { ok: false, error: "Not signed in.", hearted: false };
+      }
+      const where = and(
+        eq(schema.favorites.listenerId, listener.id),
+        eq(schema.favorites.trackTitle, args.trackTitle),
+        eq(schema.favorites.project, args.project),
+      );
+      const existing = await db
+        .select()
+        .from(schema.favorites)
+        .where(where)
+        .limit(1);
+      if (existing[0]) {
+        await db.delete(schema.favorites).where(where);
+        ctx.invalidateQueries();
+        return { ok: true, error: null, hearted: false };
+      }
+      await db.insert(schema.favorites).values({
+        listenerId: listener.id,
+        trackTitle: args.trackTitle,
+        project: args.project,
+      });
+      ctx.invalidateQueries();
+      return { ok: true, error: null, hearted: true };
     },
   }),
 

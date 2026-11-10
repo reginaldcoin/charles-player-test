@@ -101,3 +101,19 @@ export const listenerState = sqliteTable("listener_state", {
   depthMask: integer("depth_mask").notNull().default(0),
   longestStreak: integer("longest_streak").notNull().default(0),
 });
+
+// Hearts: a listener's favorited tracks, keyed exactly the way plays are
+// logged (trackTitle + project). Purely personal — a heart never touches
+// score, state, or plays.
+export const favorites = sqliteTable(
+  "favorites",
+  {
+    listenerId: integer("listener_id").notNull(),
+    trackTitle: text("track_title").notNull(),
+    project: text("project").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => [primaryKey({ columns: [t.listenerId, t.trackTitle, t.project] })],
+);
