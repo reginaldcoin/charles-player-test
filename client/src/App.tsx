@@ -1531,7 +1531,7 @@ function Standings({
                       <PresenceDot lastActiveMs={l.lastActiveMs} />
                     </span>
                     <span className="font-data block text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
-                      {l.minutes} min · {l.finishes} fin · {l.depth} deep
+                      {l.minutes} min · {l.finishes} fin
                     </span>
                     <span className="mt-1 block">
                       <DayBars bars={l.dayBars} />
