@@ -1261,7 +1261,7 @@ export function App() {
             />
           ))}
 
-        {/* ============================ BACK ROOM ============================ */}
+        {/* ============================ ADMIN PANEL ============================ */}
         {view === "backroom" &&
           (identity ? (
             <BackRoom identity={identity} />
@@ -1306,11 +1306,11 @@ export function App() {
         </p>
         <button
           type="button"
-          aria-label="Open the back room: the track board"
+          aria-label="Open the admin panel: the track board"
           onClick={() => setView("backroom")}
           className="font-data px-2 py-2 text-[11px] uppercase tracking-[0.12em] text-[var(--accent)] underline underline-offset-4"
         >
-          Back room
+          Admin panel
         </button>
       </footer>
     </div>
@@ -1936,7 +1936,172 @@ function MyRoad({
 }
 
 // ---------------------------------------------------------------------------
-// THE BACK ROOM — the songs board. Operators' view, behind the footer
+// OPERATOR TOOLS — house tools rendered only inside the admin panel's
+// allowed branch. The server still gates every action itself.
+// ---------------------------------------------------------------------------
+
+function OperatorTools({ identity }: { identity: Identity }) {
+  const queryClient = useQueryClient();
+  const [code, setCode] = useState("iM3HGWtXra");
+  const [grant, setGrant] = useState(true);
+  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(
+    null,
+  );
+  const board = useQuery({
+    queryKey: ["board"],
+    queryFn: () => api.getBoard({}),
+  });
+  const hunters =
+    board.data?.listeners.filter((listener) => listener.bugHunter) ?? [];
+
+  const setBug = useMutation({
+    mutationFn: () =>
+      api.setBugHunter({ token: identity.token, code: code.trim(), on: grant }),
+    onSuccess: (res) => {
+      if (res.ok && res.listener) {
+        setResult({
+          ok: true,
+          text: grant
+            ? `${res.listener} wears the bug now.`
+            : `${res.listener}'s bug is off.`,
+        });
+        void queryClient.invalidateQueries({ queryKey: ["board"] });
+        void queryClient.invalidateQueries({ queryKey: ["trackboard"] });
+      } else {
+        setResult({
+          ok: false,
+          text: res.error ?? "That didn't work. Try again.",
+        });
+      }
+    },
+    onError: () =>
+      setResult({
+        ok: false,
+        text: "The board won't answer right now. Try again.",
+      }),
+  });
+
+  return (
+    <div className="px-4 pb-8 pt-4">
+      <div className="nes-container px-4 py-4">
+        <h3 className="column-title font-pixel text-[20px] leading-relaxed">
+          House tools
+        </h3>
+        <p className="font-data mt-4 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+          Bug hunters
+        </p>
+        {board.isPending ? (
+          <p className="font-data mt-2 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+            Reading the board…
+          </p>
+        ) : board.error || !board.data ? (
+          <p className="mt-2 text-base leading-relaxed">
+            The board won't read right now.
+          </p>
+        ) : hunters.length === 0 ? (
+          <p className="mt-2 text-base leading-relaxed">
+            No bugs handed out yet.
+          </p>
+        ) : (
+          <ul className="mt-2">
+            {hunters.map((hunter) => (
+              <li
+                key={hunter.id}
+                className="flex min-h-[44px] flex-wrap items-center gap-x-2 py-1 text-[16px]"
+              >
+                <span className="font-medium">{hunter.name}</span>
+                <BugGlyph />
+                <span className="font-data text-[11px] text-[var(--dim)]">
+                  <TripCode code={hunter.code} />
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <form
+          className="mt-6"
+          onSubmit={(e) => {
+            e.preventDefault();
+            setResult(null);
+            setBug.mutate();
+          }}
+        >
+          <div className="nes-field">
+            <label
+              htmlFor="operator-bug-code"
+              className="font-data block text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]"
+            >
+              Listener !code
+            </label>
+            <input
+              id="operator-bug-code"
+              aria-label="Listener !code"
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              autoComplete="off"
+              className="nes-input is-dark mt-1 min-h-[48px] w-full text-[16px]"
+            />
+          </div>
+          <div
+            className="mt-5 grid grid-cols-2 gap-2"
+            role="group"
+            aria-label="Bug grant choice"
+          >
+            <button
+              type="button"
+              aria-pressed={grant}
+              onClick={() => setGrant(true)}
+              className={`font-pixel min-h-[44px] px-3 text-[11px] ${
+                grant
+                  ? "bg-[var(--accent)] text-[var(--on-accent)]"
+                  : "border border-[var(--border)] text-[var(--text)]"
+              }`}
+            >
+              Grant
+            </button>
+            <button
+              type="button"
+              aria-pressed={!grant}
+              onClick={() => setGrant(false)}
+              className={`font-pixel min-h-[44px] px-3 text-[11px] ${
+                !grant
+                  ? "bg-[var(--accent)] text-[var(--on-accent)]"
+                  : "border border-[var(--border)] text-[var(--text)]"
+              }`}
+            >
+              Remove
+            </button>
+          </div>
+          <button
+            type="submit"
+            disabled={setBug.isPending || code.trim().length === 0}
+            className="nes-btn is-pink font-pixel mt-5 min-h-[48px] w-full px-4 text-[14px] disabled:opacity-40"
+          >
+            {setBug.isPending
+              ? "Working…"
+              : grant
+                ? "Hand out the bug"
+                : "Take the bug back"}
+          </button>
+          {result && (
+            <p
+              role={result.ok ? "status" : "alert"}
+              className={`mt-4 text-[15px] leading-relaxed ${
+                result.ok ? "text-[#4ade80]" : "text-[#f87171]"
+              }`}
+            >
+              {result.text}
+            </p>
+          )}
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// THE ADMIN PANEL — the songs board. Operators' view, behind the footer
 // affordance, never in the front nav.
 // ---------------------------------------------------------------------------
 
@@ -1949,7 +2114,7 @@ function BackRoom({ identity }: { identity: Identity }) {
 
   if (board.isPending) {
     return (
-      <section aria-label="The back room: track board" className="px-4 py-10">
+      <section aria-label="The admin panel: track board" className="px-4 py-10">
         <p className="font-data text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
           Reading the track board…
         </p>
@@ -1958,7 +2123,7 @@ function BackRoom({ identity }: { identity: Identity }) {
   }
   if (board.error || !board.data) {
     return (
-      <section aria-label="The back room: track board" className="px-4 py-10">
+      <section aria-label="The admin panel: track board" className="px-4 py-10">
         <p className="text-base">The track board won't read right now.</p>
         <button
           type="button"
@@ -1974,12 +2139,12 @@ function BackRoom({ identity }: { identity: Identity }) {
   const data: TrackBoardData = board.data;
   if (!data.allowed) {
     return (
-      <section aria-label="The back room: track board" className="px-4 py-10">
+      <section aria-label="The admin panel: track board" className="px-4 py-10">
         <h2 className="column-title font-pixel text-[24px] leading-relaxed">
-          BACK ROOM
+          ADMIN PANEL
         </h2>
         <p className="mt-3 text-base leading-relaxed">
-          The back room is the operators' room.
+          The admin panel is for the operators.
         </p>
       </section>
     );
@@ -1987,11 +2152,11 @@ function BackRoom({ identity }: { identity: Identity }) {
   const crowned = data.tracks.find((t) => t.crowned && t.rank === 1);
 
   return (
-    <section aria-label="The back room: track board">
+    <section aria-label="The admin panel: track board">
       <div className="px-4 pt-4">
         <div className="nes-container with-title px-4 py-3">
           <h2 className="title column-title font-pixel text-[11px]">
-            BACK ROOM
+            ADMIN PANEL
           </h2>
           <p className="font-data max-w-[68ch] text-[11px] uppercase leading-relaxed tracking-[0.12em] text-[var(--dim)]">
             Tracks ranked by share of plays finished, shrunk toward the mean
@@ -1999,6 +2164,9 @@ function BackRoom({ identity }: { identity: Identity }) {
             starts to rank. Start = played over 5s · Finish = reached 90% or
             the natural end · Skip = bailed before 30s. Duration prints beside
             every % — short tracks finish easier, and the board says so.
+          </p>
+          <p className="font-data mt-3 max-w-[68ch] text-[11px] uppercase leading-relaxed tracking-[0.12em] text-[var(--dim)]">
+            What gets skipped stays in this room.
           </p>
         </div>
       </div>
@@ -2081,6 +2249,7 @@ function BackRoom({ identity }: { identity: Identity }) {
           </p>
         </>
       )}
+      <OperatorTools identity={identity} />
     </section>
   );
 }
