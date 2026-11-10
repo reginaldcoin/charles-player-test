@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { SafeAreaTopScrim } from "@hatch/space-sdk/client";
 import { api, type ApiResponse } from "./api";
@@ -49,6 +55,136 @@ function SkullBow() {
       className="h-[44px] w-[44px] shrink-0"
       style={{ imageRendering: "pixelated" }}
     />
+  );
+}
+
+/** Deterministic burst spread for the heart celebration: 12 pixel
+ *  sparkles on a fixed ring, no randomness in render. */
+const HEART_SPARKS = [
+  { dx: 52, dy: 0, size: 5, color: "#ff69b4" },
+  { dx: 45, dy: 26, size: 4, color: "#ffffff" },
+  { dx: 24, dy: 42, size: 6, color: "#fde047" },
+  { dx: 0, dy: 50, size: 5, color: "#ff69b4" },
+  { dx: -26, dy: 45, size: 4, color: "#ffffff" },
+  { dx: -48, dy: 28, size: 6, color: "#fde047" },
+  { dx: -54, dy: 0, size: 5, color: "#ff69b4" },
+  { dx: -46, dy: -27, size: 4, color: "#ffffff" },
+  { dx: -25, dy: -44, size: 6, color: "#fde047" },
+  { dx: 0, dy: -52, size: 5, color: "#ff69b4" },
+  { dx: 27, dy: -47, size: 4, color: "#ffffff" },
+  { dx: 49, dy: -28, size: 6, color: "#fde047" },
+];
+
+/**
+ * The heart, drawn not typed: an SVG silhouette (Press Start 2P has no
+ * heart glyph, so the old text heart fell back to a tiny system glyph
+ * and its on/off state read as a dim color swap). OFF is a white
+ * outline; ON is a solid accent fill with the white outline kept —
+ * more present, never darker. Turning ON (and only ON, and only after
+ * the toggle lands) pops the heart and throws pixel sparkles.
+ */
+function HeartButton({
+  hearted,
+  pending,
+  onToggle,
+  label,
+  size,
+}: {
+  hearted: boolean;
+  pending: boolean;
+  onToggle: () => void;
+  label: string;
+  size: "now" | "row";
+}) {
+  const glyph = size === "now" ? 36 : 26;
+  const [burstKey, setBurstKey] = useState(0);
+  const awaitingRef = useRef(false);
+
+  // Fire the burst when a click we made turns the heart ON. A failed
+  // toggle never flips `hearted`, so it never bursts; the awaiting
+  // flag expires on its own so an unrelated later flip stays quiet.
+  useEffect(() => {
+    if (hearted && awaitingRef.current) {
+      awaitingRef.current = false;
+      setBurstKey((k) => k + 1);
+    }
+  }, [hearted]);
+
+  const handleClick = () => {
+    if (!hearted) {
+      awaitingRef.current = true;
+      window.setTimeout(() => {
+        awaitingRef.current = false;
+      }, 4000);
+    }
+    onToggle();
+  };
+
+  return (
+    <span className="relative inline-flex shrink-0 flex-col items-center">
+      <button
+        type="button"
+        aria-label={label}
+        aria-pressed={hearted}
+        aria-busy={pending}
+        onClick={handleClick}
+        disabled={pending}
+        className={
+          size === "now"
+            ? "shrink-0 px-3 py-2 leading-none"
+            : "shrink-0 px-2 py-2 leading-none"
+        }
+      >
+        <span
+          className="relative block"
+          style={{ width: glyph, height: glyph }}
+        >
+          <svg
+            key={burstKey}
+            className={burstKey > 0 ? "heart-pop block" : "block"}
+            width={glyph}
+            height={glyph}
+            viewBox="0 0 24 24"
+            aria-hidden
+          >
+            <path
+              d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"
+              fill={hearted ? "var(--accent)" : "none"}
+              stroke="#ffffff"
+              strokeWidth={1.8}
+              strokeLinejoin="round"
+            />
+          </svg>
+          {burstKey > 0 && (
+            <span key={`s${burstKey}`} className="heart-sparks" aria-hidden>
+              {HEART_SPARKS.slice(0, size === "now" ? 12 : 8).map((s, i) => (
+                <span
+                  key={i}
+                  className="heart-spark"
+                  style={
+                    {
+                      width: s.size,
+                      height: s.size,
+                      backgroundColor: s.color,
+                      "--dx": `${s.dx}px`,
+                      "--dy": `${s.dy}px`,
+                    } as CSSProperties
+                  }
+                />
+              ))}
+            </span>
+          )}
+        </span>
+      </button>
+      {size === "now" && hearted && (
+        <span
+          className="font-pixel text-[9px] tracking-[0.18em]"
+          style={{ color: "var(--accent)" }}
+        >
+          HEARTED
+        </span>
+      )}
+    </span>
   );
 }
 
@@ -897,26 +1033,22 @@ export function App() {
                 {nowTrack ? nowTrack.title.toUpperCase() : "—"}
               </h1>
               {identity && nowTrack && (
-                <button
-                  type="button"
-                  aria-label={
+                <HeartButton
+                  size="now"
+                  hearted={nowHearted}
+                  pending={heartNow.isPending}
+                  label={
                     nowHearted
                       ? `Unheart ${nowTrack.title}`
                       : `Heart ${nowTrack.title}`
                   }
-                  aria-pressed={nowHearted}
-                  onClick={() =>
+                  onToggle={() =>
                     heartNow.mutate({
                       trackTitle: nowTrack.title,
                       project: nowTrack.project,
                     })
                   }
-                  disabled={heartNow.isPending}
-                  className="shrink-0 px-3 py-2 text-[44px] leading-none disabled:opacity-40"
-                  style={nowHearted ? { color: "var(--accent)" } : undefined}
-                >
-                  {nowHearted ? "♥" : "♡"}
-                </button>
+                />
               )}
             </div>
             {/* Progress: a hard-edged block bar, no knob */}
@@ -1615,26 +1747,22 @@ function MyRoad({
                     {new Date(p.playedAt).toLocaleDateString()}
                   </span>
                 </button>
-                <button
-                  type="button"
-                  aria-label={
+                <HeartButton
+                  size="row"
+                  hearted={p.hearted}
+                  pending={heart.isPending}
+                  label={
                     p.hearted
                       ? `Unheart ${p.trackTitle}`
                       : `Heart ${p.trackTitle}`
                   }
-                  aria-pressed={p.hearted}
-                  onClick={() =>
+                  onToggle={() =>
                     heart.mutate({
                       trackTitle: p.trackTitle,
                       project: p.project,
                     })
                   }
-                  disabled={heart.isPending}
-                  className="shrink-0 px-2 py-2 text-[26px] leading-none disabled:opacity-40"
-                  style={p.hearted ? { color: "var(--accent)" } : undefined}
-                >
-                  {p.hearted ? "♥" : "♡"}
-                </button>
+                />
                 <button
                   type="button"
                   aria-label={`Remove the play of ${p.trackTitle} from ${new Date(p.playedAt).toLocaleDateString()}`}
@@ -1680,22 +1808,18 @@ function MyRoad({
                     {new Date(f.heartedAt).toLocaleDateString()}
                   </span>
                 </button>
-                <button
-                  type="button"
-                  aria-label={`Unheart ${f.trackTitle}`}
-                  aria-pressed={true}
-                  onClick={() =>
+                <HeartButton
+                  size="row"
+                  hearted={true}
+                  pending={heart.isPending}
+                  label={`Unheart ${f.trackTitle}`}
+                  onToggle={() =>
                     heart.mutate({
                       trackTitle: f.trackTitle,
                       project: f.project,
                     })
                   }
-                  disabled={heart.isPending}
-                  className="shrink-0 px-2 py-2 text-[26px] leading-none disabled:opacity-40"
-                  style={{ color: "var(--accent)" }}
-                >
-                  ♥
-                </button>
+                />
               </li>
             ))}
           </ul>

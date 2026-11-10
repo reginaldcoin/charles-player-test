@@ -156,6 +156,55 @@ body {
   }
 }
 
+/* Heart celebration (owner's spec, 2026-11-10): on heart-ON the drawn
+   heart pops once and throws pixel sparkles that travel and fade —
+   transform + opacity only, no flashing. Reduced motion gets the
+   static state change alone. */
+.heart-pop {
+  animation: heart-pop 250ms ease-out;
+}
+@keyframes heart-pop {
+  0% {
+    transform: scale(1);
+  }
+  35% {
+    transform: scale(1.25);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+.heart-sparks {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.heart-spark {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  pointer-events: none;
+  animation: heart-spark 550ms ease-out forwards;
+}
+@keyframes heart-spark {
+  from {
+    transform: translate(-50%, -50%) translate(0, 0);
+    opacity: 1;
+  }
+  to {
+    transform: translate(-50%, -50%) translate(var(--dx), var(--dy));
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .heart-pop {
+    animation: none;
+  }
+  .heart-sparks {
+    display: none;
+  }
+}
+
 /* Phone text floor (owner feedback, 2026-11-09: "the text feels
    small" on phone): at phone widths the 11px data/meta lines step up
    to 13px so the readable text around the pixel headings carries —
