@@ -66,6 +66,61 @@ function BugGlyph() {
   );
 }
 
+/** Trailing 24 hours of points as 24 tiny pixel bars, oldest first. */
+function DayBars({ bars }: { bars: number[] }) {
+  const max = Math.max(0, ...bars);
+  return (
+    <svg
+      viewBox="0 0 48 16"
+      shapeRendering="crispEdges"
+      aria-hidden
+      className="h-[16px] w-[64px]"
+    >
+      {bars.map((v, i) =>
+        v > 0 ? (
+          <rect
+            key={i}
+            x={i * 2}
+            y={16 - Math.max(2, Math.round((v / max) * 15))}
+            width="1"
+            height={Math.max(2, Math.round((v / max) * 15))}
+            fill="#4ade80"
+          />
+        ) : (
+          <rect
+            key={i}
+            x={i * 2}
+            y="15"
+            width="1"
+            height="1"
+            fill="var(--dim)"
+            opacity="0.5"
+          />
+        ),
+      )}
+    </svg>
+  );
+}
+
+/** Presence: green heard from this hour, yellow quiet a while, red gone a day or more. */
+function PresenceDot({ lastActiveMs }: { lastActiveMs: number }) {
+  const age = lastActiveMs > 0 ? Date.now() - lastActiveMs : Infinity;
+  const tier =
+    age <= 3600_000
+      ? { color: "#4ade80", label: "active this hour" }
+      : age <= 24 * 3600_000
+        ? { color: "var(--accent-yellow)", label: "quiet a while" }
+        : { color: "#f87171", label: "gone a day or more" };
+  return (
+    <span
+      title={tier.label}
+      aria-label={tier.label}
+      className="ml-2 inline-block h-[8px] w-[8px] shrink-0 self-center rounded-full"
+      style={{ backgroundColor: tier.color }}
+    />
+  );
+}
+
 /** Charles's birthday: November 10, viewer-local. */
 function isCharlesBirthday(d: Date): boolean {
   return d.getMonth() === 10 && d.getDate() === 10;
@@ -1433,6 +1488,7 @@ function Standings({
                     <TripCode code={top.code} />
                   </span>
                   {top.bugHunter && <BugGlyph />}
+                  <PresenceDot lastActiveMs={top.lastActiveMs} />
                 </p>
                 <p className="font-pixel mt-3 text-[54px] leading-[1.2] text-[var(--accent)]">
                   {fmtPts1(top.score)}
@@ -1441,6 +1497,9 @@ function Standings({
                   {top.minutes} minutes · {top.finishes} finishes · {top.depth}{" "}
                   deep
                 </p>
+                <div className="mt-2">
+                  <DayBars bars={top.dayBars} />
+                </div>
               </div>
             </div>
           )}
@@ -1469,9 +1528,13 @@ function Standings({
                         <TripCode code={l.code} />
                       </span>
                       {l.bugHunter && <BugGlyph />}
+                      <PresenceDot lastActiveMs={l.lastActiveMs} />
                     </span>
                     <span className="font-data block text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
                       {l.minutes} min · {l.finishes} fin · {l.depth} deep
+                    </span>
+                    <span className="mt-1 block">
+                      <DayBars bars={l.dayBars} />
                     </span>
                   </span>
                   <span className="font-pixel shrink-0 text-[20px]">
@@ -2171,6 +2234,8 @@ function BackRoom({ identity }: { identity: Identity }) {
         </div>
       </div>
 
+      <OperatorTools identity={identity} />
+
       {data.tracks.length === 0 ? (
         <div className="px-4 py-8">
           <p className="font-pixel text-[20px] leading-relaxed">
@@ -2249,7 +2314,6 @@ function BackRoom({ identity }: { identity: Identity }) {
           </p>
         </>
       )}
-      <OperatorTools identity={identity} />
     </section>
   );
 }

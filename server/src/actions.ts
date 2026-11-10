@@ -913,7 +913,7 @@ export const Actions = {
 
   getBoard: defineAction({
     description:
-      "Returns THE LISTENERS standings: every claimed listener ranked by score, plus board totals. Empty until the first name is claimed and the first play lands.",
+      "Returns THE LISTENERS standings: every listener with points ranked by score (points get you on the board; zero-point claims stay off it), plus board totals. Empty until the first play lands.",
     request: z.object({}),
     response: z.object({
       listeners: z.array(
@@ -927,6 +927,8 @@ export const Actions = {
           minutes: z.number(),
           finishes: z.number(),
           depth: z.number(),
+          dayBars: z.array(z.number()),
+          lastActiveMs: z.number(),
         }),
       ),
       totals: z.object({
@@ -953,6 +955,32 @@ export const Actions = {
         .groupBy(schema.plays.listenerId);
       const aggById = new Map(aggs.map((a) => [a.listenerId, a]));
 
+      // Trailing-24h points per hour, one grouped query for every
+      // listener: bucket 0 is the oldest hour, 23 the current one.
+      const windowStart = Date.now() - 24 * 3600_000;
+      const hourRows = await db
+        .select({
+          listenerId: schema.plays.listenerId,
+          bucket: sql<number>`cast((${schema.plays.playedAt} - ${windowStart}) / 3600000 as integer)`,
+          points: sql<number>`coalesce(sum(${schema.plays.points}), 0)`,
+        })
+        .from(schema.plays)
+        .where(gte(schema.plays.playedAt, new Date(windowStart)))
+        .groupBy(
+          schema.plays.listenerId,
+          sql`cast((${schema.plays.playedAt} - ${windowStart}) / 3600000 as integer)`,
+        );
+      const barsById = new Map<number, number[]>();
+      for (const h of hourRows) {
+        let bars = barsById.get(h.listenerId);
+        if (!bars) {
+          bars = new Array<number>(24).fill(0);
+          barsById.set(h.listenerId, bars);
+        }
+        const b = Math.min(23, Math.max(0, h.bucket));
+        bars[b] = round2(h.points);
+      }
+
       const rows = all
         .map((l) => {
           const agg = aggById.get(l.id);
@@ -965,6 +993,8 @@ export const Actions = {
             minutes: Math.floor((agg?.creditedSec ?? 0) / 60),
             finishes: agg?.finishes ?? 0,
             depth: agg?.depth ?? 0,
+            dayBars: barsById.get(l.id) ?? new Array<number>(24).fill(0),
+            lastActiveMs: stateById.get(l.id)?.lastPlayEndMs ?? 0,
             createdAtMs: l.createdAt.getTime(),
           };
         })
@@ -973,7 +1003,9 @@ export const Actions = {
             b.score - a.score ||
             b.finishes - a.finishes ||
             a.createdAtMs - b.createdAtMs,
-        );
+        )
+        // Points get you on the board: zero-point claims never render.
+        .filter((r) => r.score > 0);
 
       let totalPlays = 0;
       let totalMinutes = 0;
@@ -995,9 +1027,11 @@ export const Actions = {
           minutes: r.minutes,
           finishes: r.finishes,
           depth: r.depth,
+          dayBars: r.dayBars,
+          lastActiveMs: r.lastActiveMs,
         })),
         totals: {
-          listeners: all.length,
+          listeners: rows.length,
           plays: totalPlays,
           minutes: totalMinutes,
           finishes: totalFinishes,
