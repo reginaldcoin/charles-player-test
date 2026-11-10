@@ -32,7 +32,7 @@
 
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
 import { Privileged } from "@space/privileged";
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, lt, sql } from "drizzle-orm";
 import * as schema from "./schema";
 
 type Db = ReturnType<Ctx["db"]>;
@@ -1435,6 +1435,35 @@ export const Actions = {
       });
       ctx.invalidateQueries();
       return { ok: true, error: null, hearted: true };
+    },
+  }),
+
+  getHeartsToday: defineAction({
+    description:
+      "Public counter: how many hearts were given on the given day, site-wide. 'Today' follows the same day-key convention as getMyRoad (DAY_KEY_RE-validated key, dayMs UTC boundaries). Returns only the count — never who hearted what.",
+    request: z.object({
+      todayKey: z.string().max(10),
+    }),
+    response: z.object({
+      ok: z.literal(true),
+      count: z.number(),
+    }),
+    async handler(ctx, args) {
+      const db = ctx.db<typeof schema>();
+      const todayKey = DAY_KEY_RE.test(args.todayKey)
+        ? args.todayKey
+        : keyFromMs(Date.now());
+      const start = dayMs(todayKey);
+      const rows = await db
+        .select({ n: sql<number>`count(*)` })
+        .from(schema.favorites)
+        .where(
+          and(
+            gte(schema.favorites.createdAt, new Date(start)),
+            lt(schema.favorites.createdAt, new Date(start + 864e5)),
+          ),
+        );
+      return { ok: true as const, count: rows[0]?.n ?? 0 };
     },
   }),
 

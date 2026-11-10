@@ -4,6 +4,7 @@ import { SafeAreaTopScrim } from "@hatch/space-sdk/client";
 import { api, type ApiResponse } from "./api";
 import { ARTIST, CATALOG } from "./catalog";
 import { TapeRenderer } from "./tape";
+import bowskullUrl from "./assets/bowskull.png";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -31,6 +32,58 @@ function fmtPts1(n: number): string {
 /** A listener's public !code, in classic tripcode green. */
 function TripCode({ code }: { code: string }) {
   return <span className="trip">!{code}</span>;
+}
+
+/** Charles's birthday: November 10, viewer-local. */
+function isCharlesBirthday(d: Date): boolean {
+  return d.getMonth() === 10 && d.getDate() === 10;
+}
+
+/** The skullbow: the house mark (bowskull.png), rendered pixelated. Decorative. */
+function SkullBow() {
+  return (
+    <img
+      src={bowskullUrl}
+      alt=""
+      aria-hidden
+      className="h-[44px] w-[44px] shrink-0"
+      style={{ imageRendering: "pixelated" }}
+    />
+  );
+}
+
+/** A pixel birthday cake: pink frosting, three candles. Decorative. */
+function BirthdayCake() {
+  return (
+    <svg
+      aria-hidden
+      viewBox="0 0 18 18"
+      shapeRendering="crispEdges"
+      className="h-[44px] w-[44px] shrink-0"
+    >
+      {/* flames + candles */}
+      <rect x="4" y="0" width="1" height="2" fill="#ffd23f" />
+      <rect x="8" y="0" width="1" height="2" fill="#ffd23f" />
+      <rect x="12" y="0" width="1" height="2" fill="#ffd23f" />
+      <rect x="4" y="2" width="1" height="4" fill="#ffffff" />
+      <rect x="8" y="2" width="1" height="4" fill="#ffffff" />
+      <rect x="12" y="2" width="1" height="4" fill="#ffffff" />
+      {/* top tier: frosting, drips, body */}
+      <rect x="4" y="6" width="10" height="1" fill="#ff69b4" />
+      <rect x="4" y="7" width="10" height="3" fill="#ffffff" />
+      <rect x="5" y="7" width="2" height="1" fill="#ff69b4" />
+      <rect x="9" y="7" width="2" height="1" fill="#ff69b4" />
+      <rect x="12" y="7" width="1" height="1" fill="#ff69b4" />
+      {/* bottom tier */}
+      <rect x="2" y="10" width="14" height="1" fill="#ff69b4" />
+      <rect x="2" y="11" width="14" height="3" fill="#ffffff" />
+      <rect x="3" y="11" width="2" height="1" fill="#ff69b4" />
+      <rect x="8" y="11" width="2" height="1" fill="#ff69b4" />
+      <rect x="13" y="11" width="2" height="1" fill="#ff69b4" />
+      {/* plate */}
+      <rect x="1" y="14" width="16" height="1" fill="#ba1e6e" />
+    </svg>
+  );
 }
 
 function localDayKey(d: Date): string {
@@ -152,11 +205,21 @@ export function App() {
     enabled: !!identity,
     refetchInterval: 30000,
   });
+  // Birthday hearts counter: public, birthday-only. The number renders
+  // only when the query has data — a wrong number never shows.
+  const birthdayToday = isCharlesBirthday(new Date());
+  const heartsToday = useQuery({
+    queryKey: ["hearts-today", localDayKey(new Date())],
+    queryFn: () => api.getHeartsToday({ todayKey: localDayKey(new Date()) }),
+    enabled: birthdayToday,
+    refetchInterval: 30000,
+  });
   const heartNow = useMutation({
     mutationFn: (args: { trackTitle: string; project: string }) =>
       api.toggleFavorite({ token: identityRef.current!.token, ...args }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["road"] });
+      void queryClient.invalidateQueries({ queryKey: ["hearts-today"] });
     },
   });
   const nowHearted =
@@ -740,6 +803,30 @@ export function App() {
               )}
             </div>
           </div>
+          {birthdayToday && (
+            <div className="mt-3 flex items-center gap-3 border-t border-[var(--border)] pt-3">
+              <SkullBow />
+              <div className="min-w-0">
+                <p
+                  className="font-pixel text-[18px] leading-relaxed"
+                  style={{ color: "var(--accent)" }}
+                >
+                  happy birthday Charles!
+                </p>
+                {heartsToday.data?.ok && (
+                  <p className="font-data mt-1 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+                    <span aria-hidden style={{ color: "var(--accent)" }}>
+                      ♥
+                    </span>{" "}
+                    {heartsToday.data.count} hearts sent to Charles today
+                  </p>
+                )}
+              </div>
+              <div className="ml-auto">
+                <BirthdayCake />
+              </div>
+            </div>
+          )}
         </div>
       </header>
 
@@ -1349,6 +1436,7 @@ function MyRoad({
       api.toggleFavorite({ token: identity.token, ...args }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["road"] });
+      void queryClient.invalidateQueries({ queryKey: ["hearts-today"] });
     },
   });
 
