@@ -573,9 +573,11 @@ export const Actions = {
 
   logPlay: defineAction({
     description:
-      "Logs one finished-or-abandoned play for the signed-in listener and returns the points it earned under the research score formula with the 8h/day eligibility cap and plausibility clamps.",
+      "Logs one finished-or-abandoned play for the signed-in listener and returns the points it earned under the research score formula with the 8h/day eligibility cap and plausibility clamps. A stale token may recover by presenting the listener's name + password: if that listener already has a live session somewhere, the play is credited WITHOUT rotating it (no sign-in ping-pong); only when no live session exists does recovery issue a fresh one, returned in the response token.",
     request: z.object({
       token: z.string().min(1),
+      name: z.string().min(1).max(40).optional(),
+      password: z.string().min(1).max(200).optional(),
       sessionId: z.string().min(1).max(64),
       trackTitle: z.string().min(1).max(200),
       project: z.string().max(200),
@@ -592,7 +594,15 @@ export const Actions = {
       points: z.number(),
       capped: z.boolean(),
       score: z.number(),
+      // Session outcome of a credential recovery: token carries the fresh
+      // session ONLY when recovery issued one (no live session existed);
+      // freshSignIn mirrors that. Both stay null/false on every other
+      // path — a play credited under an existing live session rotates
+      // nothing and returns token: null.
+      token: z.string().nullable(),
+      freshSignIn: z.boolean(),
     }),
+    privileged: [Privileged.verifyPassword],
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
       const fail = (error: string, score = 0) => ({
@@ -602,8 +612,42 @@ export const Actions = {
         points: 0,
         capped: false,
         score,
+        token: null,
+        freshSignIn: false,
       });
-      const listener = await resolveListener(db, args.token);
+      let recoveredToken: string | null = null;
+      let listener = await resolveListener(db, args.token);
+      if (!listener && args.name && args.password) {
+        // Identity recovery (ping-pong fix): the presented token is dead
+        // but the caller proves the name with its password. If a live
+        // session exists anywhere, credit the play under it and touch
+        // NOTHING — rotating here is what let a stale device steal the
+        // session back on every play, kicking the fresh device forever.
+        const nameKey = args.name.trim().replace(/\s+/g, " ").toLowerCase();
+        const candidates = await db
+          .select()
+          .from(schema.listeners)
+          .where(eq(schema.listeners.nameKey, nameKey))
+          .limit(1);
+        const found = candidates[0];
+        if (
+          found &&
+          (await verifyPassword(ctx, args.password, found.pwHash, found.pwAlgo))
+        ) {
+          const sessions = await db
+            .select({ expiresAt: schema.sessions.expiresAt })
+            .from(schema.sessions)
+            .where(eq(schema.sessions.listenerId, found.id));
+          const hasLiveSession = sessions.some(
+            (s) => s.expiresAt.getTime() > Date.now(),
+          );
+          listener = found;
+          if (!hasLiveSession) {
+            // Nobody is signed in: recovery signs this caller back in.
+            recoveredToken = await issueSession(db, found.id);
+          }
+        }
+      }
       if (!listener) {
         return fail("Not signed in. Claim your name (or sign back in) first.");
       }
@@ -860,6 +904,8 @@ export const Actions = {
         points,
         capped,
         score: newScore,
+        token: recoveredToken,
+        freshSignIn: recoveredToken !== null,
       };
     },
   }),

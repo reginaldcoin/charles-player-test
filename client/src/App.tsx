@@ -341,6 +341,15 @@ export function App() {
     enabled: !!identity,
     refetchInterval: 30000,
   });
+  // Session honesty: the stored identity renders from local storage and
+  // is never re-verified on its own; this road query IS the verification.
+  // When it answers ok:false while an identity is stored, the session is
+  // stale — rotated away by a sign-in somewhere else. The header and the
+  // road view say so and offer the sign-back-in path; the stored
+  // identity itself is kept (name and code stay his, only the password
+  // needs re-entering).
+  const sessionStale =
+    !!identity && roadLite.data !== undefined && !roadLite.data.ok;
   // Birthday hearts counter: public, birthday-only. The number renders
   // only when the query has data — a wrong number never shows.
   const birthdayToday = isCharlesBirthday(new Date());
@@ -446,6 +455,18 @@ export function App() {
       });
       settlingRef.current = Math.max(0, settlingRef.current - projected);
       if (res.ok) {
+        if (res.token) {
+          // A credential recovery issued this device a fresh session
+          // (none was live): adopt it, so the next play keeps reporting
+          // instead of dying on the stale token.
+          const next = { ...id, token: res.token };
+          setIdentity(next);
+          try {
+            localStorage.setItem(ID_KEY, JSON.stringify(next));
+          } catch {
+            // Private mode: identity lives for this session only.
+          }
+        }
         sessionBankedRef.current += res.points;
         if (res.points < projected) {
           // Settled below the projection (clamp or cap): don't drop —
@@ -868,14 +889,22 @@ export function App() {
   }, [isPlaying]);
 
   // --- Identity -----------------------------------------------------------------
-  const handleClaimed = useCallback((id: Identity) => {
-    setIdentity(id);
-    try {
-      localStorage.setItem(ID_KEY, JSON.stringify(id));
-    } catch {
-      // Private mode: identity lives for this session only.
-    }
-  }, []);
+  const handleClaimed = useCallback(
+    (id: Identity) => {
+      setIdentity(id);
+      try {
+        localStorage.setItem(ID_KEY, JSON.stringify(id));
+      } catch {
+        // Private mode: identity lives for this session only.
+      }
+      // Re-ask the road under the fresh token right away: the cached
+      // road answer belongs to the old session (a stale ok:false would
+      // otherwise linger up to the refetch interval and read as "still
+      // signed out" seconds after a successful sign-in).
+      void queryClient.invalidateQueries({ queryKey: ["road"] });
+    },
+    [queryClient],
+  );
 
   const handleSignOut = useCallback(async () => {
     const id = identityRef.current;
@@ -1151,7 +1180,21 @@ export function App() {
                 <span className="text-[var(--text)]">
                   {identity.name} <TripCode code={identity.code} />
                 </span>{" "}
-                — every finish reports to the board.
+                —{" "}
+                {sessionStale ? (
+                  <>
+                    session's out.{" "}
+                    <button
+                      type="button"
+                      onClick={() => setView("road")}
+                      className="text-[var(--text)] underline underline-offset-4"
+                    >
+                      Sign back in →
+                    </button>
+                  </>
+                ) : (
+                  "every finish reports to the board."
+                )}
               </p>
             ) : (
               <button
@@ -1177,14 +1220,17 @@ export function App() {
 
         {/* ============================= MY ROAD ============================= */}
         {view === "road" &&
-          (identity ? (
+          (identity && !sessionStale ? (
             <MyRoad
               identity={identity}
               onSignOut={() => void handleSignOut()}
               onPlayTrack={playRecent}
             />
           ) : (
-            <ClaimPanel onClaimed={handleClaimed} />
+            <ClaimPanel
+              onClaimed={handleClaimed}
+              welcomeBackName={identity?.name}
+            />
           ))}
 
         {/* ============================ BACK ROOM ============================ */}
@@ -1423,10 +1469,15 @@ function Standings({
 
 function ClaimPanel({
   onClaimed,
+  welcomeBackName,
 }: {
   onClaimed: (id: Identity) => void;
+  // Set when a stored identity's session went stale: the panel becomes
+  // a sign-back-in, name prefilled. The password is never prefilled —
+  // it is never stored anywhere.
+  welcomeBackName?: string;
 }) {
-  const [name, setName] = useState("");
+  const [name, setName] = useState(welcomeBackName ?? "");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
 
@@ -1450,14 +1501,23 @@ function ClaimPanel({
   return (
     <section aria-label="Claim your name" className="px-4 py-6">
       <h2 className="column-title font-pixel text-[24px] leading-relaxed">
-        YOUR NAME
+        {welcomeBackName ? "SIGN BACK IN" : "YOUR NAME"}
       </h2>
-      <p className="mt-3 max-w-[62ch] text-base leading-relaxed">
-        Claim a name with a password and it's yours on the board, on any
-        device. The server keeps only a scrambled hash of the password —
-        never the password itself. Beside your name sits a public code,
-        assigned at claim time, that says nothing about your password.
-      </p>
+      {welcomeBackName ? (
+        <p className="mt-3 max-w-[62ch] text-base leading-relaxed">
+          Welcome back, {welcomeBackName}. Your session ended — one
+          sign-in lives at a time, and this device's went stale. The name
+          and everything on your road are still yours; your password
+          brings this device back.
+        </p>
+      ) : (
+        <p className="mt-3 max-w-[62ch] text-base leading-relaxed">
+          Claim a name with a password and it's yours on the board, on any
+          device. The server keeps only a scrambled hash of the password —
+          never the password itself. Beside your name sits a public code,
+          assigned at claim time, that says nothing about your password.
+        </p>
+      )}
       <div className="nes-balloon from-left mt-6 max-w-[420px]">
         <p className="font-pixel text-[11px] leading-relaxed">
           NO RESET EXISTS. LOSE THE PASSWORD, THE NAME IS GONE. NOBODY
@@ -1495,7 +1555,9 @@ function ClaimPanel({
             htmlFor="claim-password"
             className="font-data block text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]"
           >
-            Password — 10+ characters, one you don't use anywhere else
+            {welcomeBackName
+              ? "Password"
+              : "Password — 10+ characters, one you don't use anywhere else"}
           </label>
           <input
             id="claim-password"
@@ -1517,11 +1579,16 @@ function ClaimPanel({
           disabled={claim.isPending || name.trim().length === 0}
           className="nes-btn is-pink font-pixel mt-8 min-h-[56px] w-full px-4 text-[16px] disabled:opacity-40"
         >
-          {claim.isPending ? "WORKING…" : "CLAIM / SIGN IN"}
+          {claim.isPending
+            ? "WORKING…"
+            : welcomeBackName
+              ? "SIGN BACK IN"
+              : "CLAIM / SIGN IN"}
         </button>
         <p className="font-data mt-3 text-[11px] uppercase leading-relaxed tracking-[0.12em] text-[var(--dim)]">
-          New name? This claims it. Already yours? The same password signs
-          you back in — and signs out every other device.
+          {welcomeBackName
+            ? "One live session at a time: signing in here signs out the other device."
+            : "New name? This claims it. Already yours? The same password signs you back in — and signs out every other device."}
         </p>
       </form>
     </section>
