@@ -32,6 +32,10 @@ const PALETTE: Palette = {
 
 const RULE_COLOR = "#ff69b4";
 
+// The field not yet covered by play runs white (owner's law, 2026-11-09):
+// until the music paints over a column, the column is white.
+const FIELD_COLOR = "#ffffff";
+
 const BANDS = 56;
 const COL_W = 2;
 const TICK_MS = 90;
@@ -62,6 +66,7 @@ export class TapeRenderer {
   private getAnalyser: () => AnalyserNode | null = () => null;
   private freq: Uint8Array | null = null;
   private changePending = false;
+  private playing = false;
   private reducedMotion = false;
   private bandBins: [number, number][] = [];
 
@@ -83,6 +88,13 @@ export class TapeRenderer {
 
   markChange() {
     this.changePending = true;
+  }
+
+  /** Playing-state gate: while not playing, new columns run white
+      instead of sampling the analyser. Starts false — the field is
+      white until the first play covers it. */
+  setPlaying(playing: boolean) {
+    this.playing = playing;
   }
 
   resize() {
@@ -137,7 +149,8 @@ export class TapeRenderer {
     const canvas = this.canvas;
     const g = this.g;
     if (!canvas || !g) return;
-    g.fillStyle = PALETTE.bg;
+    // A fresh tape is all field: white until play covers it.
+    g.fillStyle = FIELD_COLOR;
     g.fillRect(0, 0, canvas.width, canvas.height);
   }
 
@@ -198,6 +211,13 @@ export class TapeRenderer {
     if (this.changePending) {
       this.changePending = false;
       g.fillStyle = RULE_COLOR;
+      g.fillRect(x, 0, COL_W, h);
+      return;
+    }
+
+    if (!this.playing) {
+      // Not playing: the column is field, not signal — run it white.
+      g.fillStyle = FIELD_COLOR;
       g.fillRect(x, 0, COL_W, h);
       return;
     }

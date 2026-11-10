@@ -661,6 +661,13 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // The tape runs white till play: mirror the audio element's own
+  // play/pause state (the same isPlaying the ON AIR indicator reads,
+  // set from the element's play/pause events in ensureAudio).
+  useEffect(() => {
+    tapeRef.current?.setPlaying(isPlaying);
+  }, [isPlaying]);
+
   // --- Identity -----------------------------------------------------------------
   const handleClaimed = useCallback((id: Identity) => {
     setIdentity(id);
@@ -818,7 +825,7 @@ export function App() {
                     })
                   }
                   disabled={heartNow.isPending}
-                  className="shrink-0 px-2 py-1 text-[28px] leading-none disabled:opacity-40"
+                  className="shrink-0 px-3 py-2 text-[44px] leading-none disabled:opacity-40"
                   style={nowHearted ? { color: "var(--accent)" } : undefined}
                 >
                   {nowHearted ? "♥" : "♡"}
@@ -1530,7 +1537,7 @@ function MyRoad({
                     })
                   }
                   disabled={heart.isPending}
-                  className="shrink-0 px-2 py-2 text-[18px] leading-none disabled:opacity-40"
+                  className="shrink-0 px-2 py-2 text-[26px] leading-none disabled:opacity-40"
                   style={p.hearted ? { color: "var(--accent)" } : undefined}
                 >
                   {p.hearted ? "♥" : "♡"}
@@ -1591,7 +1598,7 @@ function MyRoad({
                     })
                   }
                   disabled={heart.isPending}
-                  className="shrink-0 px-2 py-2 text-[18px] leading-none disabled:opacity-40"
+                  className="shrink-0 px-2 py-2 text-[26px] leading-none disabled:opacity-40"
                   style={{ color: "var(--accent)" }}
                 >
                   ♥
