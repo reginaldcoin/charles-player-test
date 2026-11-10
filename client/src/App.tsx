@@ -1158,7 +1158,7 @@ export function App() {
                   className="font-pixel text-[18px] leading-relaxed"
                   style={{ color: "var(--accent)" }}
                 >
-                  happy birthday Charles!
+                  Happy Birthday Charles!
                 </p>
                 {heartsToday.data?.ok && (
                   <p className="font-data mt-1 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
