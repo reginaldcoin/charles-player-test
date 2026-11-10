@@ -375,6 +375,18 @@ export function App() {
   const listenedRef = useRef(0);
   const lastTimeRef = useRef(0);
   const failStreakRef = useRef(0);
+  // Haunted-playback guards (2026-11-10): a burst of quick consecutive
+  // error advances means the element is wedged, not that every track is
+  // bad; the hide-flush marker remembers a play banked on hide so the
+  // foreground reconcile can settle instead of re-reporting or skipping;
+  // isPlayingRef mirrors UI state for callbacks that can't re-subscribe.
+  const errBurstRef = useRef<{ count: number; lastAt: number }>({
+    count: 0,
+    lastAt: 0,
+  });
+  const hideFlushRef = useRef<{ trackIdx: number; at: number } | null>(null);
+  const isPlayingRef = useRef(false);
+  const reconcileBusyRef = useRef(false);
   // Stall watchdog: last position the audio clock actually reached, the
   // wall time it got there, and how many recoveries this track has had.
   const lastProgressRef = useRef(0);
@@ -623,6 +635,7 @@ export function App() {
       navBackRef.current = false;
       setHasPrev(historyRef.current.length > 0);
       currentRef.current = idx;
+      hideFlushRef.current = null;
       listenedRef.current = 0;
       lastTimeRef.current = 0;
       lastProgressRef.current = 0;
@@ -646,6 +659,7 @@ export function App() {
     async (natural: boolean) => {
       await reportPlay(natural);
       failStreakRef.current = 0;
+      errBurstRef.current = { count: 0, lastAt: 0 };
       loadTrack(pickNext(), true);
     },
     [reportPlay, pickNext, loadTrack],
@@ -656,6 +670,22 @@ export function App() {
     if (failStreakRef.current > CATALOG.length) {
       // Everything failed in a row: stop advancing, stay calm.
       setIsPlaying(false);
+      return;
+    }
+    // Burst cap: three error advances inside 10s of each other is a
+    // wedged element falling down its own staircase (the haunted skip
+    // cascade), not three bad tracks. Stop on the current track and
+    // stay calm; the outer failStreak ceiling above still bounds all.
+    const now = Date.now();
+    const burst = errBurstRef.current;
+    const inBurst = burst.lastAt > 0 && now - burst.lastAt <= 10000;
+    const count = inBurst ? burst.count + 1 : 1;
+    errBurstRef.current = { count, lastAt: now };
+    if (count >= 3) {
+      errBurstRef.current = { count: 0, lastAt: 0 };
+      setIsPlaying(false);
+      setLastAward("THAT TRACK WON'T PLAY — PRESS PLAY TO TRY AGAIN");
+      window.setTimeout(() => setLastAward(null), 5000);
       return;
     }
     window.setTimeout(() => {
@@ -674,8 +704,14 @@ export function App() {
     audio.addEventListener("error", () => {
       if (currentRef.current >= 0) handleTrackError();
     });
-    audio.addEventListener("play", () => setIsPlaying(true));
-    audio.addEventListener("pause", () => setIsPlaying(false));
+    audio.addEventListener("play", () => {
+      isPlayingRef.current = true;
+      setIsPlaying(true);
+    });
+    audio.addEventListener("pause", () => {
+      isPlayingRef.current = false;
+      setIsPlaying(false);
+    });
     audio.addEventListener("playing", () => {
       // Real motion again: the watchdog stands down for this track.
       stallAttemptsRef.current = 0;
@@ -865,6 +901,11 @@ export function App() {
           lastProgressRef.current = ct;
           lastProgressAtRef.current = Date.now();
           stallHintRef.current = false;
+          // A play that has genuinely run 30s+ is healthy: any earlier
+          // error burst is history, not a pattern.
+          if (listenedRef.current >= 30) {
+            errBurstRef.current = { count: 0, lastAt: 0 };
+          }
         } else if (
           currentRef.current >= 0 &&
           audio.readyState < 3 &&
@@ -939,12 +980,71 @@ export function App() {
   useEffect(() => {
     const onHide = () => {
       if (document.visibilityState === "hidden" && listenedRef.current >= 5) {
+        // Marker FIRST: the reconcile on return must know this track's
+        // play was already banked here, so it settles instead of
+        // re-reporting or error-skipping (mechanism C).
+        hideFlushRef.current = {
+          trackIdx: currentRef.current,
+          at: Date.now(),
+        };
         void reportPlay(false);
       }
     };
     document.addEventListener("visibilitychange", onHide);
     return () => document.removeEventListener("visibilitychange", onHide);
   }, [reportPlay]);
+
+  // Foreground reconcile (mechanism A): on returning to the window, if
+  // the UI believes it is playing but the element disagrees — another
+  // app stole the phone's audio, or the element froze while suspended —
+  // settle against reality. Never errors, never advances, never touches
+  // the stall watchdog; one recovery attempt at most, then calm.
+  useEffect(() => {
+    const reconcile = () => {
+      if (reconcileBusyRef.current) return;
+      const audio = audioRef.current;
+      if (!audio || currentRef.current < 0 || !isPlayingRef.current) return;
+      const stalled =
+        Date.now() - lastProgressAtRef.current > 4000 &&
+        audio.currentTime <= lastProgressRef.current + 0.05;
+      if (!audio.paused && !stalled) return; // honestly playing
+      reconcileBusyRef.current = true;
+      const marker = hideFlushRef.current;
+      if (marker && marker.trackIdx === currentRef.current) {
+        // This play was already banked by the hide-flush: just settle
+        // at the element's true position, no resume, no report.
+        hideFlushRef.current = null;
+        lastTimeRef.current = audio.currentTime;
+        setIsPlaying(false);
+        reconcileBusyRef.current = false;
+        return;
+      }
+      // One recovery attempt at the element's own position.
+      void audio
+        .play()
+        .then(() => {
+          reconcileBusyRef.current = false;
+        })
+        .catch(() => {
+          // Focus/autoplay policy says no: settle calm on this track.
+          lastTimeRef.current = audio.currentTime;
+          setIsPlaying(false);
+          setLastAward("THAT TRACK WON'T PLAY — PRESS PLAY TO TRY AGAIN");
+          window.setTimeout(() => setLastAward(null), 5000);
+          reconcileBusyRef.current = false;
+        });
+    };
+    const onVis = () => {
+      if (document.visibilityState === "visible") reconcile();
+    };
+    const onFocus = () => reconcile();
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, []);
 
   // --- Tape lifecycle -----------------------------------------------------------
   useEffect(() => {
