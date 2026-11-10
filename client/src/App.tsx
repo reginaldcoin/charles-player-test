@@ -387,6 +387,19 @@ export function App() {
   const hideFlushRef = useRef<{ trackIdx: number; at: number } | null>(null);
   const isPlayingRef = useRef(false);
   const reconcileBusyRef = useRef(false);
+  // Addendum 2 (owner, 2026-11-10): a stolen-audio episode. The flag is
+  // raised when the UI claims playing but the element is paused while
+  // VISIBLE (the interruption case — another app took the sound). While
+  // it stands, the clock interval retries play() on stall-window
+  // spacing, at most 3 attempts, then settles per mechanism A. Any
+  // element 'pause' event clears it: real pauses are indistinguishable
+  // at the event level, so pausing — by the user OR by the interruption
+  // itself — ends the episode, and only an episode still standing when
+  // the interval ticks gets auto-resumed. User pause intent also flows
+  // through the same event, so a user pause is never overridden live.
+  const stolenRef = useRef<{ attempts: number; lastTryAt: number } | null>(
+    null,
+  );
   // Stall watchdog: last position the audio clock actually reached, the
   // wall time it got there, and how many recoveries this track has had.
   const lastProgressRef = useRef(0);
@@ -711,6 +724,8 @@ export function App() {
     audio.addEventListener("pause", () => {
       isPlayingRef.current = false;
       setIsPlaying(false);
+      // Any pause event ends a stolen-audio episode (see stolenRef).
+      stolenRef.current = null;
     });
     audio.addEventListener("playing", () => {
       // Real motion again: the watchdog stands down for this track.
@@ -937,6 +952,43 @@ export function App() {
         }
       } else {
         lastTimeRef.current = audio.currentTime;
+        // Auto-resume (Addendum 2): the element sits paused. If the UI
+        // state says playing, we are VISIBLE, and no pause event ever
+        // landed, this is a silent steal/freeze, not a user pause —
+        // raise (or continue) the episode and try to take the sound
+        // back from the element's frozen position. Bounded: at most 3
+        // attempts, spaced by the stall window (6s, 3s on a stall
+        // hint); then settle paused and stop trying. If the page was
+        // fully suspended this interval never ran, and the foreground
+        // reconcile covers the return instead.
+        if (
+          audio.paused &&
+          !audio.ended &&
+          isPlayingRef.current &&
+          currentRef.current >= 0 &&
+          document.visibilityState === "visible"
+        ) {
+          const ep = stolenRef.current ?? { attempts: 0, lastTryAt: 0 };
+          stolenRef.current = ep;
+          const spacing = stallHintRef.current ? 3000 : 6000;
+          if (
+            ep.attempts < 3 &&
+            Date.now() - ep.lastTryAt >= spacing
+          ) {
+            ep.attempts += 1;
+            ep.lastTryAt = Date.now();
+            void audio.play().catch(() => undefined);
+          } else if (
+            ep.attempts >= 3 &&
+            Date.now() - ep.lastTryAt >= spacing
+          ) {
+            // Retries exhausted: settle per mechanism A.
+            stolenRef.current = null;
+            setIsPlaying(false);
+            setLastAward("THAT TRACK WON'T PLAY — PRESS PLAY TO TRY AGAIN");
+            window.setTimeout(() => setLastAward(null), 5000);
+          }
+        }
       }
       // Ease any settled-below-projection difference down gently
       // (~1.5s) rather than letting the live counter drop in one step.
