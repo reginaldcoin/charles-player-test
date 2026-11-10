@@ -49,6 +49,11 @@ const SESSION_BONUS_SEC = 60 * 60;
 const STREAK_DAY_MIN_SEC = 10 * 60; // a streak day needs >=10 credited minutes
 const MAX_FREEZES = 2;
 const SESSION_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+// The back room is the operators' room. Codes are public identity —
+// they print beside every name on the board — so the key is not the
+// code itself but whose session asks: only these two listeners' own
+// sessions open the track board; every other caller gets a closed door.
+const OPERATOR_CODES = ["ld.LS3qH5c", "4ACX6Obxg/"];
 
 // ---------------------------------------------------------------------------
 // Password hashing — slow KDF only, executed host-side via the privileged
@@ -1190,9 +1195,10 @@ export const Actions = {
 
   getTrackBoard: defineAction({
     description:
-      "Returns the back-room track board: tracks ranked by Wilson-adjusted completion rate (minimum 10 starts to rank), with duration beside every percentage and per-length-band crowns.",
-    request: z.object({}),
+      "Returns the back-room track board: tracks ranked by Wilson-adjusted completion rate (minimum 10 starts to rank), with duration beside every percentage and per-length-band crowns. Operators only: the caller's session must belong to a back-room operator, else the door stays closed and the board comes back empty.",
+    request: z.object({ token: z.string().min(1) }),
     response: z.object({
+      allowed: z.boolean(),
       tracks: z.array(
         z.object({
           rank: z.number().nullable(),
@@ -1210,8 +1216,16 @@ export const Actions = {
       ),
       totals: z.object({ tracks: z.number(), starts: z.number() }),
     }),
-    async handler(ctx) {
+    async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
+      const listener = await resolveListener(db, args.token);
+      if (!listener || !OPERATOR_CODES.includes(listener.code)) {
+        return {
+          allowed: false,
+          tracks: [],
+          totals: { tracks: 0, starts: 0 },
+        };
+      }
       const rows = await db
         .select({
           title: schema.plays.trackTitle,
@@ -1276,6 +1290,7 @@ export const Actions = {
       ];
 
       return {
+        allowed: true,
         tracks: out.map((t) => ({
           rank: t.rank,
           title: t.title,

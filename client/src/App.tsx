@@ -969,7 +969,12 @@ export function App() {
           ))}
 
         {/* ============================ BACK ROOM ============================ */}
-        {view === "backroom" && <BackRoom />}
+        {view === "backroom" &&
+          (identity ? (
+            <BackRoom identity={identity} />
+          ) : (
+            <ClaimPanel onClaimed={handleClaimed} />
+          ))}
       </main>
 
       {/* Front nav — a ruled strip pinned to the bottom; the live view
@@ -1624,10 +1629,10 @@ function MyRoad({
 // affordance, never in the front nav.
 // ---------------------------------------------------------------------------
 
-function BackRoom() {
+function BackRoom({ identity }: { identity: Identity }) {
   const board = useQuery({
-    queryKey: ["trackboard"],
-    queryFn: () => api.getTrackBoard({}),
+    queryKey: ["trackboard", identity.id],
+    queryFn: () => api.getTrackBoard({ token: identity.token }),
     refetchInterval: 30000,
   });
 
@@ -1656,6 +1661,18 @@ function BackRoom() {
   }
 
   const data: TrackBoardData = board.data;
+  if (!data.allowed) {
+    return (
+      <section aria-label="The back room: track board" className="px-4 py-10">
+        <h2 className="column-title font-pixel text-[24px] leading-relaxed">
+          BACK ROOM
+        </h2>
+        <p className="mt-3 text-base leading-relaxed">
+          The back room is the operators' room.
+        </p>
+      </section>
+    );
+  }
   const crowned = data.tracks.find((t) => t.crowned && t.rank === 1);
 
   return (
