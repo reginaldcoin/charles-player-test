@@ -396,6 +396,18 @@ export function App() {
   const currentRef = useRef(-1);
   const listenedRef = useRef(0);
   const lastTimeRef = useRef(0);
+  // Wall time of the last progress sample. Listened time is credited
+  // from the audio clock, bounded by the wall time actually elapsed
+  // since the previous sample — so background playback (where timers
+  // are throttled to near-nothing but the song keeps playing) still
+  // counts honestly, while a seek forward can never outrun the wall.
+  const sampleAtRef = useRef(0);
+  // Next-track preload: a detached element warming the upcoming file
+  // into the browser cache while the current track plays, so the
+  // song-to-song handoff in the dark starts from cache, not cold
+  // network. A hint only — the advance itself still picks for real.
+  const preloadRef = useRef<HTMLAudioElement | null>(null);
+  const preloadIdxRef = useRef(-1);
   const failStreakRef = useRef(0);
   // Haunted-playback guards (2026-11-10): a burst of quick consecutive
   // error advances means the element is wedged, not that every track is
@@ -625,6 +637,42 @@ export function App() {
     }
   }, [queryClient]);
 
+  // Progress sampler: credit listened time from the audio element's
+  // own clock, bounded by wall time elapsed since the last sample.
+  // Called by the 250ms clock interval in the foreground AND by the
+  // element's timeupdate events, which keep firing while a track
+  // plays with the screen off — so a song played through sleep still
+  // settles with the minutes it actually ran, not the minutes a
+  // throttled timer happened to witness. Seeks are rejected by the
+  // same bound (a jump forward outruns the wall). atEnded takes the
+  // final sample as the track ends, before reportPlay captures.
+  const sampleProgress = useCallback((atEnded = false) => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    if (!atEnded && (audio.paused || audio.ended)) return;
+    const now = Date.now();
+    const wall =
+      sampleAtRef.current > 0 ? (now - sampleAtRef.current) / 1000 : 0;
+    sampleAtRef.current = now;
+    const ct = audio.currentTime;
+    const d = ct - lastTimeRef.current;
+    if (d > 0 && d <= wall + 1) {
+      listenedRef.current += d;
+      sessionListenedRef.current += d;
+    }
+    lastTimeRef.current = ct;
+    if (ct > lastProgressRef.current + 0.05) {
+      lastProgressRef.current = ct;
+      lastProgressAtRef.current = now;
+      stallHintRef.current = false;
+      // A play that has genuinely run 30s+ is healthy: any earlier
+      // error burst is history, not a pattern.
+      if (listenedRef.current >= 30) {
+        errBurstRef.current = { count: 0, lastAt: 0 };
+      }
+    }
+  }, []);
+
   const pickNext = useCallback((): number => {
     if (CATALOG.length === 1) return 0;
     if (bagRef.current.length === 0) {
@@ -642,6 +690,49 @@ export function App() {
     }
     return bagRef.current.pop() ?? 0;
   }, []);
+
+  // Peek at the track pickNext would serve (refilling the bag the
+  // same way) without consuming it. Exists only to aim the preload;
+  // the real advance still pops for itself.
+  const peekNext = useCallback((): number => {
+    if (CATALOG.length === 1) return 0;
+    if (bagRef.current.length === 0) {
+      const all = CATALOG.map((_, i) => i).filter(
+        (i) => i !== currentRef.current,
+      );
+      for (let i = all.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        const tmp = all[i] as number;
+        all[i] = all[j] as number;
+        all[j] = tmp;
+      }
+      bagRef.current = all;
+    }
+    return bagRef.current[bagRef.current.length - 1] ?? 0;
+  }, []);
+
+  // Warm the next track's file into the browser cache on a detached
+  // element. When the current song ends in the dark, the handoff then
+  // loads from cache instead of opening a cold connection a sleeping
+  // phone may never finish. Best-effort: any failure just means the
+  // advance loads the way it always did.
+  const preloadNext = useCallback(() => {
+    try {
+      const idx = peekNext();
+      if (idx === preloadIdxRef.current) return;
+      const tr = CATALOG[idx];
+      if (!tr) return;
+      preloadIdxRef.current = idx;
+      if (!preloadRef.current) {
+        preloadRef.current = new Audio();
+        preloadRef.current.preload = "auto";
+      }
+      preloadRef.current.src = tr.src;
+      preloadRef.current.load();
+    } catch {
+      // Preload is a courtesy to the handoff, never a failure path.
+    }
+  }, [peekNext]);
 
   const updateMediaSession = useCallback((idx: number) => {
     const tr = CATALOG[idx];
@@ -674,6 +765,7 @@ export function App() {
       hideFlushRef.current = null;
       listenedRef.current = 0;
       lastTimeRef.current = 0;
+      sampleAtRef.current = Date.now();
       lastProgressRef.current = 0;
       lastProgressAtRef.current = Date.now();
       stallAttemptsRef.current = 0;
@@ -686,14 +778,24 @@ export function App() {
       if (autoplay) {
         audio.play().catch(() => handleTrackError());
       }
+      // This track is rolling: warm the one after it.
+      preloadIdxRef.current = -1;
+      preloadNext();
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [updateMediaSession],
+    [updateMediaSession, preloadNext],
   );
 
+  // THE HANDOFF: report first, but never WAIT on the report.
+  // reportPlay captures the outgoing play synchronously (track,
+  // listened, duration) and its POST settles in the background; the
+  // next track loads and starts immediately. The old shape awaited
+  // the network before even setting the next src — with the screen
+  // off, a sleeping phone stalls that POST indefinitely, the song
+  // ends, and nothing ever starts (Matteo's report, 2026-11-11).
   const advance = useCallback(
-    async (natural: boolean) => {
-      await reportPlay(natural);
+    (natural: boolean) => {
+      void reportPlay(natural);
       failStreakRef.current = 0;
       errBurstRef.current = { count: 0, lastAt: 0 };
       loadTrack(pickNext(), true);
@@ -725,7 +827,10 @@ export function App() {
       return;
     }
     window.setTimeout(() => {
-      void reportPlay(false).then(() => loadTrack(pickNext(), true));
+      // Same rule as the natural handoff: settle in the background,
+      // load the next track now — never gate playback on the POST.
+      void reportPlay(false);
+      loadTrack(pickNext(), true);
     }, 1200);
   }, [reportPlay, pickNext, loadTrack]);
 
@@ -735,7 +840,16 @@ export function App() {
     audio.crossOrigin = "anonymous";
     audio.preload = "auto";
     audio.addEventListener("ended", () => {
+      // Final sample first: the tail of the track counts too, then
+      // the handoff fires. Driven by the element's own event, never
+      // by a timer — timers are exactly what a sleeping phone takes.
+      sampleProgress(true);
       void advance(true);
+    });
+    audio.addEventListener("timeupdate", () => {
+      // The media clock keeps ticking while a song plays in the
+      // dark; sample from it so background minutes are real minutes.
+      sampleProgress();
     });
     audio.addEventListener("error", () => {
       if (currentRef.current >= 0) handleTrackError();
@@ -743,10 +857,22 @@ export function App() {
     audio.addEventListener("play", () => {
       isPlayingRef.current = true;
       setIsPlaying(true);
+      try {
+        if ("mediaSession" in navigator)
+          navigator.mediaSession.playbackState = "playing";
+      } catch {
+        // Garnish only.
+      }
     });
     audio.addEventListener("pause", () => {
       isPlayingRef.current = false;
       setIsPlaying(false);
+      try {
+        if ("mediaSession" in navigator)
+          navigator.mediaSession.playbackState = "paused";
+      } catch {
+        // Garnish only.
+      }
       // Any pause event ends a stolen-audio episode (see stolenRef).
       stolenRef.current = null;
     });
@@ -780,7 +906,7 @@ export function App() {
     }
     return audio;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [advance, handleTrackError]);
+  }, [advance, handleTrackError, sampleProgress]);
 
   const restartTrack = useCallback(async () => {
     const audio = audioRef.current;
@@ -788,6 +914,7 @@ export function App() {
     await reportPlay(false);
     listenedRef.current = 0;
     lastTimeRef.current = 0;
+    sampleAtRef.current = Date.now();
     audio.currentTime = 0;
     tapeRef.current?.markChange();
     await audio.play().catch(() => undefined);
@@ -924,27 +1051,17 @@ export function App() {
       if (!audio) return;
       if (!audio.paused && !audio.ended) {
         const ct = audio.currentTime;
-        const d = ct - lastTimeRef.current;
-        if (d > 0 && d < 2) {
-          listenedRef.current += d;
-          sessionListenedRef.current += d;
-        }
-        lastTimeRef.current = ct;
+        // Credit and progress tracking live in the shared sampler;
+        // timeupdate events feed it too, so a track playing in the
+        // dark accumulates exactly like one on screen.
+        sampleProgress();
         // Stall watchdog: the track should be moving. If the position
         // has not advanced for seconds while the element says it lacks
         // data, the stream has wedged — re-open it at the last known
         // position. Three tries per track, then the error path takes
         // it. A user pause never reaches here (paused branch above).
-        if (ct > lastProgressRef.current + 0.05) {
-          lastProgressRef.current = ct;
-          lastProgressAtRef.current = Date.now();
-          stallHintRef.current = false;
-          // A play that has genuinely run 30s+ is healthy: any earlier
-          // error burst is history, not a pattern.
-          if (listenedRef.current >= 30) {
-            errBurstRef.current = { count: 0, lastAt: 0 };
-          }
-        } else if (
+        if (
+          ct <= lastProgressRef.current + 0.05 &&
           currentRef.current >= 0 &&
           audio.readyState < 3 &&
           Date.now() - lastProgressAtRef.current >
@@ -973,8 +1090,19 @@ export function App() {
             }
           }
         }
+        // Near the end: make sure the next file is warm. Normally
+        // loadTrack already aimed the preload; this catches the bag
+        // having changed under us (a manual jump filtered a track).
+        if (
+          isFinite(audio.duration) &&
+          audio.duration > 0 &&
+          audio.duration - ct < 60
+        ) {
+          preloadNext();
+        }
       } else {
         lastTimeRef.current = audio.currentTime;
+        sampleAtRef.current = Date.now();
         // Auto-resume (Addendum 2): the element sits paused. If the UI
         // state says playing, we are VISIBLE, and no pause event ever
         // landed, this is a silent steal/freeze, not a user pause —
@@ -1049,7 +1177,7 @@ export function App() {
       }
     }, 250);
     return () => window.clearInterval(t);
-  }, [started, nowTrack]);
+  }, [started, nowTrack, sampleProgress, preloadNext]);
 
   // Flush the in-progress play if the page goes away mid-track.
   useEffect(() => {
@@ -1084,6 +1212,16 @@ export function App() {
         audio.currentTime <= lastProgressRef.current + 0.05;
       if (!audio.paused && !stalled) return; // honestly playing
       reconcileBusyRef.current = true;
+      // Re-anchor every progress baseline at the element's position
+      // NOW. Across a suspension the wall clock jumped while the
+      // audio clock may not have; if the stall watchdog keeps judging
+      // from the pre-sleep baseline, its first act on return is a
+      // spurious src reset — the hiccupy catch-up heard after long
+      // unattended sessions. From here, everything measures fresh.
+      lastTimeRef.current = audio.currentTime;
+      sampleAtRef.current = Date.now();
+      lastProgressRef.current = audio.currentTime;
+      lastProgressAtRef.current = Date.now();
       const marker = hideFlushRef.current;
       if (marker && marker.trackIdx === currentRef.current) {
         // This play was already banked by the hide-flush: just settle
