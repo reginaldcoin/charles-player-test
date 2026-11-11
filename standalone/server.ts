@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { Actions } from "../server/src/actions";
 import { handlers as privilegedHandlers } from "../server/src/privileged";
 import * as schema from "../server/src/schema";
+import { createFingerprintHandler } from "./fingerprint-route";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PORT = Number(process.env.PORT ?? 3000);
@@ -263,10 +264,18 @@ async function handleAction(req: Request): Promise<Response> {
   }
 }
 
+const handleFingerprint = createFingerprintHandler(dirname(DB_PATH));
+
 Bun.serve({
   port: PORT,
   async fetch(req) {
     const url = new URL(req.url);
+    if (
+      req.method === "GET" &&
+      (url.pathname === "/fingerprint" || url.pathname.endsWith("/fingerprint"))
+    ) {
+      return handleFingerprint(url);
+    }
     if (url.pathname === "/actions" || url.pathname.endsWith("/actions")) {
       if (req.method !== "POST") {
         return Response.json({ error: "POST only" }, { status: 405 });

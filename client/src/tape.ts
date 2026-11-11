@@ -1,8 +1,16 @@
-// THE TAPE — a spectrogram waterfall. Each new column is one slice of the
-// live spectrum (log-spaced frequency bands, low frequencies at the
+// THE TAPE — a spectrogram waterfall. Each new column is one slice of
+// the spectrum (log-spaced frequency bands, low frequencies at the
 // bottom); history scrolls left into a tapestry. A hot-pink rule marks
-// every track change. Driven by an AnalyserNode tapped off the single
-// <audio> element — the visuals never drive scoring; the audio clock does.
+// every track change. The visuals never drive scoring; the audio clock
+// does.
+//
+// The spectrum no longer comes from a live analyser: routing the sound
+// through a Web Audio graph let iOS suspend the music itself in the
+// background. The server now precomputes each track's spectrogram once
+// (server/fingerprint.ts, in the analyser's own scale) and this
+// renderer samples that fingerprint at the audio element's current
+// position. The tape reads the music; the music never routes through
+// anything to be heard.
 //
 // Motion safety: columns land ~11 times a second but each changes only a
 // 2px slice — no full-screen luminance pulses, nothing flashes. With
@@ -58,21 +66,26 @@ function colorFor(palette: Palette, v: number): string {
   return `rgb(${last[0]},${last[1]},${last[2]})`;
 }
 
+/**
+ * One column of the tape: BANDS band values in 0..255 (pre-gamma), or
+ * null when the current track has no fingerprint yet. Supplied by the
+ * player, sampled from the precomputed data at the playback position.
+ */
+export type TapeColumnProvider = () => ArrayLike<number> | null;
+
 export class TapeRenderer {
   private canvas: HTMLCanvasElement | null = null;
   private g: CanvasRenderingContext2D | null = null;
   private raf = 0;
   private lastTick = 0;
-  private getAnalyser: () => AnalyserNode | null = () => null;
-  private freq: Uint8Array | null = null;
+  private getColumn: TapeColumnProvider = () => null;
   private changePending = false;
   private playing = false;
   private reducedMotion = false;
-  private bandBins: [number, number][] = [];
 
-  attach(canvas: HTMLCanvasElement, getAnalyser: () => AnalyserNode | null) {
+  attach(canvas: HTMLCanvasElement, getColumn: TapeColumnProvider) {
     this.canvas = canvas;
-    this.getAnalyser = getAnalyser;
+    this.getColumn = getColumn;
     this.g = canvas.getContext("2d");
     this.reducedMotion =
       typeof window !== "undefined" &&
@@ -91,7 +104,7 @@ export class TapeRenderer {
   }
 
   /** Playing-state gate: while not playing, new columns run white
-      instead of sampling the analyser. Starts false — the field is
+      instead of sampling the fingerprint. Starts false — the field is
       white until the first play covers it. */
   setPlaying(playing: boolean) {
     this.playing = playing;
@@ -117,32 +130,12 @@ export class TapeRenderer {
       g.fillRect(0, 0, w, h);
       g.drawImage(old, 0, 0, old.width, old.height, 0, 0, w, h);
     }
-    this.computeBands();
   }
 
   destroy() {
     cancelAnimationFrame(this.raf);
     this.canvas = null;
     this.g = null;
-  }
-
-  private computeBands() {
-    const analyser = this.getAnalyser();
-    const sampleRate = analyser?.context.sampleRate ?? 48000;
-    const binCount = analyser?.frequencyBinCount ?? 1024;
-    const minF = 40;
-    const maxF = 16000;
-    this.bandBins = [];
-    for (let b = 0; b < BANDS; b++) {
-      const f0 = minF * Math.pow(maxF / minF, b / BANDS);
-      const f1 = minF * Math.pow(maxF / minF, (b + 1) / BANDS);
-      const i0 = Math.max(1, Math.floor((f0 / (sampleRate / 2)) * binCount));
-      const i1 = Math.min(
-        binCount,
-        Math.max(i0 + 1, Math.ceil((f1 / (sampleRate / 2)) * binCount)),
-      );
-      this.bandBins.push([i0, i1]);
-    }
   }
 
   private clearAll() {
@@ -205,7 +198,6 @@ export class TapeRenderer {
     // Scroll history left by one column.
     g.drawImage(canvas, -COL_W, 0);
 
-    const analyser = this.getAnalyser();
     const x = w - COL_W;
 
     if (this.changePending) {
@@ -222,27 +214,21 @@ export class TapeRenderer {
       return;
     }
 
-    if (!analyser) {
+    const column = this.getColumn();
+    if (!column) {
+      // Playing, but this track's fingerprint has not landed yet: the
+      // column is ground, not signal — the same dark the tape drew
+      // when no analysis existed. The music is never delayed for it.
       g.fillStyle = palette.bg;
       g.fillRect(x, 0, COL_W, h);
       return;
     }
-    if (!this.freq || this.freq.length !== analyser.frequencyBinCount) {
-      this.freq = new Uint8Array(analyser.frequencyBinCount);
-      this.computeBands();
-    }
-    analyser.getByteFrequencyData(this.freq);
 
     const bandH = h / BANDS;
     for (let b = 0; b < BANDS; b++) {
-      const range = this.bandBins[b];
-      if (!range) continue;
-      const [i0, i1] = range;
-      let sum = 0;
-      for (let i = i0; i < i1; i++) sum += this.freq[i] ?? 0;
-      const avg = sum / Math.max(1, i1 - i0) / 255;
+      const raw = (column[b] ?? 0) / 255;
       // Gentle gamma lift so quiet passages still read on the tape.
-      const v = Math.pow(avg, 0.72);
+      const v = Math.pow(raw, 0.72);
       g.fillStyle = colorFor(palette, v);
       g.fillRect(x, h - (b + 1) * bandH, COL_W, bandH + 1);
     }

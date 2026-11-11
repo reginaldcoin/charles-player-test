@@ -10,6 +10,11 @@ import { SafeAreaTopScrim } from "@hatch/space-sdk/client";
 import { api, type ApiResponse } from "./api";
 import { ARTIST, CATALOG } from "./catalog";
 import { TapeRenderer } from "./tape";
+import {
+  ensureFingerprint,
+  getFingerprint,
+  sampleFingerprint,
+} from "./fingerprint";
 import bowskullUrl from "./assets/bowskull.png";
 
 // ---------------------------------------------------------------------------
@@ -381,10 +386,11 @@ export function App() {
 
   // --- Player state ---------------------------------------------------------
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const audioCtxRef = useRef<{
-    ctx: AudioContext;
-    analyser: AnalyserNode;
-  } | null>(null);
+  // Scratch column the tape samples each tick from the current track's
+  // precomputed fingerprint (see ./fingerprint). There is deliberately
+  // no Web Audio graph anywhere in this player: the element's sound
+  // goes straight to the device, and the tape reads data, not signal.
+  const tapeColumnRef = useRef<Float32Array>(new Float32Array(56));
   const tapeRef = useRef<TapeRenderer | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const bagRef = useRef<number[]>([]);
@@ -729,6 +735,9 @@ export function App() {
       }
       preloadRef.current.src = tr.src;
       preloadRef.current.load();
+      // Warm the next track's tape fingerprint alongside its audio, so
+      // the handoff paints from its first second too.
+      ensureFingerprint(tr.src);
     } catch {
       // Preload is a courtesy to the handoff, never a failure path.
     }
@@ -774,6 +783,8 @@ export function App() {
       setTrackClock({ elapsed: 0, duration: tr.durationSec ?? 0 });
       tapeRef.current?.markChange();
       updateMediaSession(idx);
+      // The tape's data rides along lazily; playback never waits on it.
+      ensureFingerprint(tr.src);
       audio.src = tr.src;
       if (autoplay) {
         audio.play().catch(() => handleTrackError());
@@ -920,38 +931,8 @@ export function App() {
     await audio.play().catch(() => undefined);
   }, [reportPlay]);
 
-  // AudioContext + analyser are born inside a user gesture, or the
-  // tape runs silent-frozen. Shared by the first PLAY tap and by
-  // playing a track straight from Recent Plays.
-  const ensureAnalysis = useCallback((audio: HTMLAudioElement) => {
-    try {
-      if (!audioCtxRef.current) {
-        const AC =
-          window.AudioContext ??
-          (window as unknown as { webkitAudioContext?: typeof AudioContext })
-            .webkitAudioContext;
-        if (AC) {
-          const ctx = new AC();
-          const source = ctx.createMediaElementSource(audio);
-          const analyser = ctx.createAnalyser();
-          analyser.fftSize = 2048;
-          analyser.smoothingTimeConstant = 0.82;
-          source.connect(analyser);
-          analyser.connect(ctx.destination);
-          audioCtxRef.current = { ctx, analyser };
-        }
-      }
-      if (audioCtxRef.current?.ctx.state === "suspended") {
-        void audioCtxRef.current.ctx.resume();
-      }
-    } catch {
-      // No analysis available: playback continues, tape draws silence.
-    }
-  }, []);
-
   const startPlayback = useCallback(() => {
     const audio = ensureAudio();
-    ensureAnalysis(audio);
     try {
       const nav = navigator as unknown as {
         audioSession?: { type: string };
@@ -967,7 +948,7 @@ export function App() {
     } else {
       void audio.play().catch(() => undefined);
     }
-  }, [ensureAudio, ensureAnalysis, loadTrack, pickNext, requestWakeLock]);
+  }, [ensureAudio, loadTrack, pickNext, requestWakeLock]);
 
   // PREVIOUS: step back one track in this session's play order. The
   // in-flight play settles exactly the way NEXT settles it (reportPlay
@@ -994,8 +975,7 @@ export function App() {
         await restartTrack();
         return;
       }
-      const audio = ensureAudio();
-      ensureAnalysis(audio);
+      ensureAudio();
       setStarted(true);
       void requestWakeLock();
       bagRef.current = bagRef.current.filter((i) => i !== idx);
@@ -1005,14 +985,7 @@ export function App() {
       failStreakRef.current = 0;
       loadTrack(idx, true);
     },
-    [
-      ensureAudio,
-      ensureAnalysis,
-      loadTrack,
-      reportPlay,
-      requestWakeLock,
-      restartTrack,
-    ],
+    [ensureAudio, loadTrack, reportPlay, requestWakeLock, restartTrack],
   );
 
   // Recent Plays entries resolve against the catalog by title +
@@ -1264,7 +1237,24 @@ export function App() {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const tape = new TapeRenderer();
-    tape.attach(canvas, () => audioCtxRef.current?.analyser ?? null);
+    // The tape samples the current track's precomputed fingerprint at
+    // the element's own position. No fingerprint yet (first-ever play,
+    // still computing): null, and the tape draws its dark ground
+    // columns until the data lands — playback is never held for it.
+    tape.attach(canvas, () => {
+      const audio = audioRef.current;
+      const idx = currentRef.current;
+      if (!audio || idx < 0) return null;
+      const tr = CATALOG[idx];
+      if (!tr) return null;
+      const fp = getFingerprint(tr.src);
+      if (!fp) {
+        ensureFingerprint(tr.src);
+        return null;
+      }
+      sampleFingerprint(fp, audio.currentTime, tapeColumnRef.current);
+      return tapeColumnRef.current;
+    });
     tapeRef.current = tape;
     const onResize = () => tape.resize();
     window.addEventListener("resize", onResize);
