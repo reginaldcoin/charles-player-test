@@ -430,6 +430,7 @@ export function App() {
   // the object URL the main element is currently playing from.
   const blobRef = useRef<{ idx: number; url: string } | null>(null);
   const blobFetchIdxRef = useRef(-1);
+  const blobAbortRef = useRef<AbortController | null>(null);
   const currentBlobRef = useRef<string | null>(null);
   // Stall ladder (2026-11-11): replaces the src-resetting watchdog.
   // stallSinceRef marks when the playhead last froze; ladderStageRef
@@ -865,6 +866,19 @@ export function App() {
   // song never starves the current one on a waking radio.
   const preloadNext = useCallback(() => {
     try {
+      // BANDWIDTH YIELD (2026-11-12): a prefetch in flight aborts if
+      // the PLAYING track's cushion later drains under 5s — the
+      // current song's stream outranks the next song's download. The
+      // fetch may restart on a later tick once the cushion recovers
+      // (the >= 15s start gate below gives the pair hysteresis).
+      if (
+        blobAbortRef.current &&
+        currentRef.current >= 0 &&
+        bufferedAhead() < 5
+      ) {
+        blobAbortRef.current.abort();
+        blobAbortRef.current = null;
+      }
       const idx = peekNext();
       const tr = CATALOG[idx];
       if (!tr) return;
@@ -879,9 +893,11 @@ export function App() {
       ensureFingerprint(tr.src);
       if (blobFetchIdxRef.current === idx) return;
       blobFetchIdxRef.current = idx;
+      const controller = new AbortController();
+      blobAbortRef.current = controller;
       void (async () => {
         try {
-          const res = await fetch(tr.src);
+          const res = await fetch(tr.src, { signal: controller.signal });
           if (!res.ok) throw new Error("prefetch failed");
           const blob = await res.blob();
           const url = URL.createObjectURL(blob);
@@ -889,6 +905,10 @@ export function App() {
           blobRef.current = { idx, url };
           preloadIdxRef.current = idx;
         } catch {
+          // A deliberate yield (bandwidth abort above) is not a
+          // failure: skip the cache-warm fallback, which would pull
+          // the same bytes over the same hungry radio.
+          if (controller.signal.aborted) return;
           // Fallback: warm the cache on the detached element.
           try {
             if (preloadIdxRef.current !== idx) {
@@ -905,6 +925,7 @@ export function App() {
           }
         } finally {
           if (blobFetchIdxRef.current === idx) blobFetchIdxRef.current = -1;
+          if (blobAbortRef.current === controller) blobAbortRef.current = null;
         }
       })();
     } catch {
@@ -1247,11 +1268,15 @@ export function App() {
       const audio = audioRef.current;
       if (!audio) return;
       if (!audio.paused && !audio.ended) {
-        const ct = audio.currentTime;
         // Credit and progress tracking live in the shared sampler;
         // timeupdate events feed it too, so a track playing in the
-        // dark accumulates exactly like one on screen.
+        // dark accumulates exactly like one on screen. The sampler
+        // runs FIRST: it is what stamps lastProgressAtRef, the last
+        // moment the playhead was observed to move, and every
+        // position reading in this tick is taken after that
+        // observation, never before it.
         sampleProgress();
+        const ct = audio.currentTime;
         recHeartbeat(recSnap());
         updatePositionState();
         // Prefetch runs on the cushion rule now: offer it every tick
@@ -1276,15 +1301,30 @@ export function App() {
         //       track. Past the ladder, the error path takes it.
         // A user pause never reaches here (paused branch below).
         if (currentRef.current >= 0) {
-          const frozen = ct <= lastProgressRef.current + 0.05;
-          if (!frozen) {
-            stallSinceRef.current = 0;
+          // CUSHION GATE (2026-11-12): with more than a second of
+          // audio in hand there is no stall to recover from — the
+          // ladder stands down entirely: no timing, no stages. A
+          // genuine network stall drains the cushion first; only
+          // then may a freeze start timing. (Flight ring 22 caught
+          // the old ladder micro-seeking healthy tracks holding
+          // 46–272s of buffer, chopping the songs itself.)
+          const nowMs = Date.now();
+          // FREEZE is wall-clock time since the playhead was last
+          // observed to move — lastProgressAtRef, stamped by the
+          // sampler at the top of this same tick. No position-vs-
+          // snapshot race: throttled background timers once desynced
+          // the two readings and the verdict cried frozen over a
+          // healthy song.
+          const frozenFor =
+            lastProgressAtRef.current > 0
+              ? nowMs - lastProgressAtRef.current
+              : 0;
+          if (bufferedAhead() > 1 || frozenFor < 1000) {
+            // Cushion in hand, or motion observed within the last
+            // second: healthy. Stand down and reset.
             ladderStageRef.current = 0;
             ladderProbeRef.current = null;
           } else {
-            const nowMs = Date.now();
-            if (stallSinceRef.current === 0) stallSinceRef.current = nowMs;
-            const frozenFor = nowMs - stallSinceRef.current;
             const stage = ladderStageRef.current;
             const tr = CATALOG[currentRef.current];
             if (frozenFor >= 17000 && stage < 4) {
@@ -1312,13 +1352,12 @@ export function App() {
                     : tr.src;
                 void audio.play().catch(() => undefined);
                 // A reload buys a fresh ladder window for this freeze.
-                stallSinceRef.current = nowMs;
+                lastProgressAtRef.current = nowMs;
                 ladderStageRef.current = 0;
                 ladderProbeRef.current = null;
               } else {
                 // No proven network, or the reload cap is spent: the
                 // error path takes the track from here.
-                stallSinceRef.current = 0;
                 ladderStageRef.current = 0;
                 ladderProbeRef.current = null;
                 handleTrackError();
