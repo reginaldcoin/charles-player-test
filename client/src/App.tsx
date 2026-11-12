@@ -10,6 +10,13 @@ import { SafeAreaTopScrim } from "@hatch/space-sdk/client";
 import { api, type ApiResponse } from "./api";
 import { ARTIST, CATALOG } from "./catalog";
 import { judgeResume, RESUME_KEY, type ResumeSave } from "./resume";
+import {
+  recBoot,
+  recEvent,
+  recGoodbye,
+  recHeartbeat,
+  type FlightSnap,
+} from "./recorder";
 import { TapeRenderer } from "./tape";
 import {
   ensureFingerprint,
@@ -415,6 +422,23 @@ export function App() {
   // network. A hint only — the advance itself still picks for real.
   const preloadRef = useRef<HTMLAudioElement | null>(null);
   const preloadIdxRef = useRef(-1);
+  // Blob prefetch (2026-11-11, the playback program): the next track's
+  // bytes, fetched whole and held as an object URL, so the handoff can
+  // start the main element from memory with zero network at the seam.
+  // The detached-element warm above stays as the fallback when a fetch
+  // cannot complete. blobRef is the held prefetch; currentBlobRef is
+  // the object URL the main element is currently playing from.
+  const blobRef = useRef<{ idx: number; url: string } | null>(null);
+  const blobFetchIdxRef = useRef(-1);
+  const currentBlobRef = useRef<string | null>(null);
+  // Stall ladder (2026-11-11): replaces the src-resetting watchdog.
+  // stallSinceRef marks when the playhead last froze; ladderStageRef
+  // is the highest rung already tried for this freeze; the probe
+  // result gates the hard reload; reloads are capped per track.
+  const stallSinceRef = useRef(0);
+  const ladderStageRef = useRef(0);
+  const ladderProbeRef = useRef<{ ok: boolean } | null>(null);
+  const ladderReloadsRef = useRef(0);
   const failStreakRef = useRef(0);
   // Haunted-playback guards (2026-11-10): a burst of quick consecutive
   // error advances means the element is wedged, not that every track is
@@ -771,31 +795,122 @@ export function App() {
     return bagRef.current[bagRef.current.length - 1] ?? 0;
   }, []);
 
-  // Warm the next track's file into the browser cache on a detached
-  // element. When the current song ends in the dark, the handoff then
-  // loads from cache instead of opening a cold connection a sleeping
-  // phone may never finish. Best-effort: any failure just means the
-  // advance loads the way it always did.
+  // Seconds of audio buffered ahead of the playhead — the single
+  // most diagnostic number in the player: it gates the prefetch (a
+  // hungry radio should finish the current song's cushion before it
+  // starts pulling the next one) and it judges stalls (a freeze with
+  // cushion in hand is not a network stall).
+  const bufferedAhead = useCallback((): number => {
+    const audio = audioRef.current;
+    if (!audio) return 0;
+    try {
+      const ct = audio.currentTime;
+      for (let i = 0; i < audio.buffered.length; i++) {
+        if (audio.buffered.start(i) <= ct && ct <= audio.buffered.end(i)) {
+          return Math.max(0, audio.buffered.end(i) - ct);
+        }
+      }
+    } catch {
+      // No ranges yet: no cushion.
+    }
+    return 0;
+  }, []);
+
+  // The flight recorder's snapshot of this moment.
+  const recSnap = useCallback((): FlightSnap => {
+    const audio = audioRef.current;
+    const idx = currentRef.current;
+    const tr = idx >= 0 ? CATALOG[idx] : undefined;
+    return {
+      track: tr ? tr.title : "",
+      ct: audio ? audio.currentTime || 0 : 0,
+      dur:
+        audio && isFinite(audio.duration) && audio.duration > 0
+          ? audio.duration
+          : (tr?.durationSec ?? 0),
+      buf: bufferedAhead(),
+      rs: audio ? audio.readyState : 0,
+      ns: audio ? audio.networkState : 0,
+      paused: audio ? audio.paused : true,
+    };
+  }, [bufferedAhead]);
+
+  // Media Session position state: keeps Android's media notification
+  // honest about where the song is on long sessions.
+  const updatePositionState = useCallback(() => {
+    try {
+      const audio = audioRef.current;
+      if (!audio || !("mediaSession" in navigator)) return;
+      const dur = audio.duration;
+      if (!isFinite(dur) || dur <= 0) return;
+      navigator.mediaSession.setPositionState({
+        duration: dur,
+        playbackRate: audio.playbackRate || 1,
+        position: Math.min(Math.max(0, audio.currentTime || 0), dur),
+      });
+    } catch {
+      // Garnish only.
+    }
+  }, []);
+
+  // Warm the next track. Two courtesies, in order of strength:
+  //   1. Fetch the whole file and hold it as a blob object URL, so
+  //      the handoff starts the main element from bytes already in
+  //      hand — zero silence at the seam, which is the window where
+  //      a sleeping phone's battery police reap background pages.
+  //   2. If the fetch cannot complete, warm the browser cache on the
+  //      detached element instead (the original mechanism).
+  // Gated on the current track's cushion: prefetch does not start
+  // until the playing song has >= 15s buffered ahead, so the next
+  // song never starves the current one on a waking radio.
   const preloadNext = useCallback(() => {
     try {
       const idx = peekNext();
-      if (idx === preloadIdxRef.current) return;
       const tr = CATALOG[idx];
       if (!tr) return;
-      preloadIdxRef.current = idx;
-      if (!preloadRef.current) {
-        preloadRef.current = new Audio();
-        preloadRef.current.preload = "auto";
+      if (blobRef.current?.idx === idx) return;
+      if (idx === preloadIdxRef.current) return;
+      const audio = audioRef.current;
+      if (audio && currentRef.current >= 0 && bufferedAhead() < 15) {
+        return; // Cushion first; the clock interval retries.
       }
-      preloadRef.current.src = tr.src;
-      preloadRef.current.load();
       // Warm the next track's tape fingerprint alongside its audio, so
       // the handoff paints from its first second too.
       ensureFingerprint(tr.src);
+      if (blobFetchIdxRef.current === idx) return;
+      blobFetchIdxRef.current = idx;
+      void (async () => {
+        try {
+          const res = await fetch(tr.src);
+          if (!res.ok) throw new Error("prefetch failed");
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          if (blobRef.current) URL.revokeObjectURL(blobRef.current.url);
+          blobRef.current = { idx, url };
+          preloadIdxRef.current = idx;
+        } catch {
+          // Fallback: warm the cache on the detached element.
+          try {
+            if (preloadIdxRef.current !== idx) {
+              preloadIdxRef.current = idx;
+              if (!preloadRef.current) {
+                preloadRef.current = new Audio();
+                preloadRef.current.preload = "auto";
+              }
+              preloadRef.current.src = tr.src;
+              preloadRef.current.load();
+            }
+          } catch {
+            // Preload is a courtesy to the handoff, never a failure path.
+          }
+        } finally {
+          if (blobFetchIdxRef.current === idx) blobFetchIdxRef.current = -1;
+        }
+      })();
     } catch {
       // Preload is a courtesy to the handoff, never a failure path.
     }
-  }, [peekNext]);
+  }, [peekNext, bufferedAhead]);
 
   const updateMediaSession = useCallback((idx: number) => {
     const tr = CATALOG[idx];
@@ -833,13 +948,41 @@ export function App() {
       lastProgressAtRef.current = Date.now();
       stallAttemptsRef.current = 0;
       stallHintRef.current = false;
+      stallSinceRef.current = 0;
+      ladderStageRef.current = 0;
+      ladderProbeRef.current = null;
+      ladderReloadsRef.current = 0;
       setNowIdx(idx);
       setTrackClock({ elapsed: 0, duration: tr.durationSec ?? 0 });
       tapeRef.current?.markChange();
       updateMediaSession(idx);
       // The tape's data rides along lazily; playback never waits on it.
       ensureFingerprint(tr.src);
-      audio.src = tr.src;
+      // The seam: if the prefetch holds this track's bytes, the main
+      // element starts from memory and the boundary has no network
+      // silence in it at all. Otherwise it loads the way it always
+      // did, from the warmed cache or the network.
+      const held = blobRef.current;
+      if (currentBlobRef.current && currentBlobRef.current !== held?.url) {
+        URL.revokeObjectURL(currentBlobRef.current);
+        currentBlobRef.current = null;
+      }
+      if (held && held.idx === idx) {
+        audio.src = held.url;
+        currentBlobRef.current = held.url;
+        blobRef.current = null;
+      } else {
+        audio.src = tr.src;
+      }
+      recEvent("track", {
+        track: tr.title,
+        ct: 0,
+        dur: tr.durationSec ?? 0,
+        buf: 0,
+        rs: audio.readyState,
+        ns: audio.networkState,
+        paused: audio.paused,
+      });
       if (autoplay) {
         audio.play().catch(() => handleTrackError());
       }
@@ -914,6 +1057,7 @@ export function App() {
       // Final sample first: the tail of the track counts too, then
       // the handoff fires. Driven by the element's own event, never
       // by a timer — timers are exactly what a sleeping phone takes.
+      recEvent("ended", recSnap());
       sampleProgress(true);
       void advance(true);
     });
@@ -923,9 +1067,11 @@ export function App() {
       sampleProgress();
     });
     audio.addEventListener("error", () => {
+      recEvent("error", recSnap());
       if (currentRef.current >= 0) handleTrackError();
     });
     audio.addEventListener("play", () => {
+      recEvent("play", recSnap());
       isPlayingRef.current = true;
       setIsPlaying(true);
       try {
@@ -936,6 +1082,7 @@ export function App() {
       }
     });
     audio.addEventListener("pause", () => {
+      recEvent("pause", recSnap());
       isPlayingRef.current = false;
       setIsPlaying(false);
       try {
@@ -953,12 +1100,18 @@ export function App() {
     });
     audio.addEventListener("playing", () => {
       // Real motion again: the watchdog stands down for this track.
+      recEvent("playing", recSnap());
       stallAttemptsRef.current = 0;
       stallHintRef.current = false;
+      stallSinceRef.current = 0;
+      ladderStageRef.current = 0;
+      ladderProbeRef.current = null;
       lastProgressAtRef.current = Date.now();
+      updatePositionState();
     });
     const onStallHint = () => {
       stallHintRef.current = true;
+      recEvent("stallhint", recSnap());
     };
     audio.addEventListener("stalled", onStallHint);
     audio.addEventListener("waiting", onStallHint);
@@ -966,13 +1119,19 @@ export function App() {
     try {
       if ("mediaSession" in navigator) {
         navigator.mediaSession.setActionHandler("play", () => {
+          recEvent("msaction", { ...recSnap(), note: "play" });
           void audio.play().catch(() => undefined);
         });
-        navigator.mediaSession.setActionHandler("pause", () => audio.pause());
+        navigator.mediaSession.setActionHandler("pause", () => {
+          recEvent("msaction", { ...recSnap(), note: "pause" });
+          audio.pause();
+        });
         navigator.mediaSession.setActionHandler("nexttrack", () => {
+          recEvent("msaction", { ...recSnap(), note: "nexttrack" });
           void advance(false);
         });
         navigator.mediaSession.setActionHandler("previoustrack", () => {
+          recEvent("msaction", { ...recSnap(), note: "previoustrack" });
           void goPrevious();
         });
       }
@@ -1093,37 +1252,103 @@ export function App() {
         // timeupdate events feed it too, so a track playing in the
         // dark accumulates exactly like one on screen.
         sampleProgress();
-        // Stall watchdog: the track should be moving. If the position
-        // has not advanced for seconds while the element says it lacks
-        // data, the stream has wedged — re-open it at the last known
-        // position. Three tries per track, then the error path takes
-        // it. A user pause never reaches here (paused branch above).
-        if (
-          ct <= lastProgressRef.current + 0.05 &&
-          currentRef.current >= 0 &&
-          audio.readyState < 3 &&
-          Date.now() - lastProgressAtRef.current >
-            (stallHintRef.current ? 3000 : 6000)
-        ) {
-          lastProgressAtRef.current = Date.now();
-          if (stallAttemptsRef.current >= 3) {
-            stallAttemptsRef.current = 0;
-            handleTrackError();
+        recHeartbeat(recSnap());
+        updatePositionState();
+        // Prefetch runs on the cushion rule now: offer it every tick
+        // and let preloadNext itself refuse until the playing track
+        // has >= 15s buffered ahead.
+        preloadNext();
+        // THE STALL LADDER (2026-11-11) — replaces the old watchdog,
+        // which reset audio.src on a stall: that tore down the
+        // connection, threw away good buffered audio, and stretched a
+        // short radio hiccup into seconds of dead air. The ladder
+        // escalates gently and touches the source only as a last,
+        // proven resort:
+        //   L0  0–4s frozen: do nothing. If buffered-ahead > 0.5s it
+        //       is not a network stall at all; browsers ride out most
+        //       freezes on their own.
+        //   L1  4–6s: a gentle play() nudge.
+        //   L2  8–10s: a micro-seek (+0.05s) to unstick the decoder.
+        //   L3  10–15s: an out-of-band HEAD probe of the file. Never
+        //       reloads anything; never fires while offline.
+        //   L4  15–20s+: hard src reload ONLY when the probe proved
+        //       the network can serve the file, capped at 2 per
+        //       track. Past the ladder, the error path takes it.
+        // A user pause never reaches here (paused branch below).
+        if (currentRef.current >= 0) {
+          const frozen = ct <= lastProgressRef.current + 0.05;
+          if (!frozen) {
+            stallSinceRef.current = 0;
+            ladderStageRef.current = 0;
+            ladderProbeRef.current = null;
           } else {
-            stallAttemptsRef.current += 1;
+            const nowMs = Date.now();
+            if (stallSinceRef.current === 0) stallSinceRef.current = nowMs;
+            const frozenFor = nowMs - stallSinceRef.current;
+            const stage = ladderStageRef.current;
             const tr = CATALOG[currentRef.current];
-            if (tr) {
-              const pos = lastProgressRef.current;
-              const resume = () => {
-                try {
-                  audio.currentTime = pos;
-                } catch {
-                  // Not seekable yet: play from wherever it lands.
-                }
-                audio.removeEventListener("loadedmetadata", resume);
-              };
-              audio.addEventListener("loadedmetadata", resume);
-              audio.src = tr.src;
+            if (frozenFor >= 17000 && stage < 4) {
+              ladderStageRef.current = 4;
+              recEvent("watchdog", { ...recSnap(), stage: 4 });
+              if (
+                tr &&
+                ladderProbeRef.current?.ok &&
+                ladderReloadsRef.current < 2
+              ) {
+                ladderReloadsRef.current += 1;
+                const pos = lastProgressRef.current;
+                const resume = () => {
+                  try {
+                    audio.currentTime = pos;
+                  } catch {
+                    // Not seekable yet: play from wherever it lands.
+                  }
+                  audio.removeEventListener("loadedmetadata", resume);
+                };
+                audio.addEventListener("loadedmetadata", resume);
+                audio.src =
+                  blobRef.current?.idx === currentRef.current
+                    ? blobRef.current.url
+                    : tr.src;
+                void audio.play().catch(() => undefined);
+                // A reload buys a fresh ladder window for this freeze.
+                stallSinceRef.current = nowMs;
+                ladderStageRef.current = 0;
+                ladderProbeRef.current = null;
+              } else {
+                // No proven network, or the reload cap is spent: the
+                // error path takes the track from here.
+                stallSinceRef.current = 0;
+                ladderStageRef.current = 0;
+                ladderProbeRef.current = null;
+                handleTrackError();
+              }
+            } else if (frozenFor >= 12000 && stage < 3) {
+              ladderStageRef.current = 3;
+              recEvent("watchdog", { ...recSnap(), stage: 3 });
+              if (tr && navigator.onLine) {
+                void fetch(tr.src, { method: "HEAD" })
+                  .then((res) => {
+                    ladderProbeRef.current = { ok: res.ok };
+                  })
+                  .catch(() => {
+                    ladderProbeRef.current = { ok: false };
+                  });
+              } else {
+                ladderProbeRef.current = { ok: false };
+              }
+            } else if (frozenFor >= 9000 && stage < 2) {
+              ladderStageRef.current = 2;
+              recEvent("watchdog", { ...recSnap(), stage: 2 });
+              try {
+                audio.currentTime = ct + 0.05;
+              } catch {
+                // Not seekable: the nudge below still applies.
+              }
+              void audio.play().catch(() => undefined);
+            } else if (frozenFor >= 5000 && stage < 1) {
+              ladderStageRef.current = 1;
+              recEvent("watchdog", { ...recSnap(), stage: 1 });
               void audio.play().catch(() => undefined);
             }
           }
@@ -1255,10 +1480,14 @@ export function App() {
         void reportPlay(false);
       }
       persistResume(true);
+      // The flight recorder's goodbye: a ring ending in pagehide is
+      // a clean close. A ring that just stops is a death, and the
+      // next boot files it.
+      recGoodbye(recSnap());
     };
     window.addEventListener("pagehide", onPageHide);
     return () => window.removeEventListener("pagehide", onPageHide);
-  }, [reportPlay, persistResume]);
+  }, [reportPlay, persistResume, recSnap]);
 
   // Foreground reconcile (mechanism A): on returning to the window, if
   // the UI believes it is playing but the element disagrees — another
@@ -1285,6 +1514,9 @@ export function App() {
       sampleAtRef.current = Date.now();
       lastProgressRef.current = audio.currentTime;
       lastProgressAtRef.current = Date.now();
+      stallSinceRef.current = 0;
+      ladderStageRef.current = 0;
+      ladderProbeRef.current = null;
       const marker = hideFlushRef.current;
       if (marker && marker.trackIdx === currentRef.current) {
         // This play was already banked by the hide-flush: just settle
@@ -1320,6 +1552,52 @@ export function App() {
       document.removeEventListener("visibilitychange", onVis);
       window.removeEventListener("focus", onFocus);
     };
+  }, []);
+
+  // --- Flight recorder: boot judgment + lifecycle ears (2026-11-11) -----------
+  // On mount, judge the previous session: if its ring does not end in
+  // a pagehide goodbye, it died in the dark, and this boot files the
+  // anonymous death report by itself. Then keep this session's ears
+  // open: visibility, freeze/resume, pageshow, network changes.
+  useEffect(() => {
+    const death = recBoot();
+    if (death) {
+      void api
+        .reportCrash({
+          uaFamily: death.uaFamily,
+          diedAt: death.diedAt,
+          events: death.events,
+        })
+        .catch(() => undefined);
+    }
+    const snap = () => recSnap();
+    const onVis = () => recEvent("visibility", snap());
+    const onFreeze = () => recEvent("freeze", snap());
+    const onResume = () => recEvent("resume", snap());
+    const onShow = (ev: PageTransitionEvent) =>
+      recEvent("pageshow", { ...snap(), note: ev.persisted ? "persisted" : "fresh" });
+    const onOnline = () =>
+      recEvent("online", {
+        ...snap(),
+        note: (navigator as { connection?: { effectiveType?: string } }).connection
+          ?.effectiveType,
+      });
+    const onOffline = () => recEvent("offline", snap());
+    document.addEventListener("visibilitychange", onVis);
+    document.addEventListener("freeze", onFreeze);
+    document.addEventListener("resume", onResume);
+    window.addEventListener("pageshow", onShow);
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      document.removeEventListener("freeze", onFreeze);
+      document.removeEventListener("resume", onResume);
+      window.removeEventListener("pageshow", onShow);
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // --- Resume on reopen (2026-11-11) ------------------------------------------
@@ -1850,6 +2128,10 @@ export function App() {
           Admin panel
         </button>
       </footer>
+      <p className="font-data px-4 pb-4 text-[11px] uppercase leading-relaxed tracking-[0.12em] text-[var(--dim)]">
+        If the player crashes, it reports the crash anonymously so we can
+        fix it. Your listening stays yours.
+      </p>
     </div>
   );
 }
@@ -2789,6 +3071,50 @@ function OperatorTools({ identity }: { identity: Identity }) {
 // affordance, never in the front nav.
 // ---------------------------------------------------------------------------
 
+// Crash reports: the flight recorder's anonymous death reports.
+// Machine facts only, filed by the player itself when a session dies
+// without a clean close. Operators' eyes only, same door as the rest
+// of this room; reports are never used to identify anyone.
+function CrashReports({ identity }: { identity: Identity }) {
+  const reports = useQuery({
+    queryKey: ["crashreports", identity.id],
+    queryFn: () => api.getCrashReports({ token: identity.token }),
+    refetchInterval: 60000,
+  });
+  if (!reports.data?.allowed) return null;
+  const data = reports.data;
+  return (
+    <div className="px-4 pt-4">
+      <div className="nes-container with-title px-4 py-3">
+        <h3 className="title column-title font-pixel text-[11px]">
+          CRASH REPORTS
+        </h3>
+        <p className="font-data max-w-[68ch] text-[11px] uppercase leading-relaxed tracking-[0.12em] text-[var(--dim)]">
+          Anonymous death reports the player files itself when a session
+          dies without a clean close. Machine facts only. Gone after 30
+          days. {data.total} on file.
+        </p>
+        {data.reports.length > 0 && (
+          <ol className="mt-3">
+            {data.reports.slice(0, 8).map((r) => (
+              <li
+                key={r.id}
+                className="font-data border-t border-[var(--border)] py-2 text-[11px] uppercase leading-relaxed tracking-[0.12em]"
+              >
+                {new Date(r.receivedAt).toLocaleString()} · {r.uaFamily} ·{" "}
+                {r.eventCount} events · last: {r.lastEvent}
+                {r.lastTrack
+                  ? ` · ${r.lastTrack} at ${fmtTime(r.lastCt)} of ${fmtTime(r.lastDur)}`
+                  : ""}
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function BackRoom({ identity }: { identity: Identity }) {
   const board = useQuery({
     queryKey: ["trackboard", identity.id],
@@ -2856,6 +3182,8 @@ function BackRoom({ identity }: { identity: Identity }) {
       </div>
 
       <OperatorTools identity={identity} />
+
+      <CrashReports identity={identity} />
 
       {data.tracks.length === 0 ? (
         <div className="px-4 py-8">

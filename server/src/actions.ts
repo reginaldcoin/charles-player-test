@@ -1710,4 +1710,99 @@ export const Actions = {
       return { ok: true, error: null, listener: target.name, bugHunter: args.on };
     },
   }),
+
+  reportCrash: defineAction({
+    description:
+      "Files an anonymous crash report from the player's flight recorder. No token, no identity: the payload is machine facts only (coarse UA family + the event ring). Rows older than 30 days are purged on every write.",
+    request: z.object({
+      uaFamily: z.string().min(1).max(120),
+      diedAt: z.number().int().nonnegative(),
+      events: z.array(z.record(z.string(), z.unknown())).max(200),
+    }),
+    response: z.object({ ok: z.boolean() }),
+    async handler(ctx, args) {
+      const db = ctx.db<typeof schema>();
+      const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      await db
+        .delete(schema.crashReports)
+        .where(lt(schema.crashReports.receivedAt, cutoff));
+      await db.insert(schema.crashReports).values({
+        uaFamily: args.uaFamily,
+        diedAt: args.diedAt,
+        payload: JSON.stringify(args.events),
+      });
+      return { ok: true };
+    },
+  }),
+
+  getCrashReports: defineAction({
+    description:
+      "Returns recent anonymous crash reports for the operators only (same door as the track board). Reports carry no listener identity and are never used to identify anyone.",
+    request: z.object({ token: z.string().min(1) }),
+    response: z.object({
+      allowed: z.boolean(),
+      total: z.number(),
+      reports: z.array(
+        z.object({
+          id: z.number(),
+          receivedAt: z.string(),
+          uaFamily: z.string(),
+          diedAt: z.number(),
+          eventCount: z.number(),
+          lastEvent: z.string(),
+          lastTrack: z.string(),
+          lastCt: z.number(),
+          lastDur: z.number(),
+          events: z.array(z.record(z.string(), z.unknown())),
+        }),
+      ),
+    }),
+    async handler(ctx, args) {
+      const db = ctx.db<typeof schema>();
+      const listener = await resolveListener(db, args.token);
+      if (!listener || !OPERATOR_CODES.includes(listener.code)) {
+        return { allowed: false, total: 0, reports: [] };
+      }
+      const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      await db
+        .delete(schema.crashReports)
+        .where(lt(schema.crashReports.receivedAt, cutoff));
+      const all = await db
+        .select({ id: schema.crashReports.id })
+        .from(schema.crashReports);
+      const rows = await db
+        .select()
+        .from(schema.crashReports)
+        .orderBy(desc(schema.crashReports.id))
+        .limit(20);
+      return {
+        allowed: true,
+        total: all.length,
+        reports: rows.map((r) => {
+          let events: Record<string, unknown>[] = [];
+          try {
+            const parsed = JSON.parse(r.payload) as unknown;
+            if (Array.isArray(parsed)) {
+              events = parsed as Record<string, unknown>[];
+            }
+          } catch {
+            events = [];
+          }
+          const last = events[events.length - 1] ?? {};
+          return {
+            id: r.id,
+            receivedAt: r.receivedAt.toISOString(),
+            uaFamily: r.uaFamily,
+            diedAt: r.diedAt,
+            eventCount: events.length,
+            lastEvent: typeof last.e === "string" ? last.e : "",
+            lastTrack: typeof last.track === "string" ? last.track : "",
+            lastCt: typeof last.ct === "number" ? last.ct : 0,
+            lastDur: typeof last.dur === "number" ? last.dur : 0,
+            events,
+          };
+        }),
+      };
+    },
+  }),
 } satisfies ActionsModule;

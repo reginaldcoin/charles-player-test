@@ -104,6 +104,21 @@ export const listenerState = sqliteTable("listener_state", {
   longestStreak: integer("longest_streak").notNull().default(0),
 });
 
+// Anonymous crash reports (2026-11-11): the player's flight recorder
+// files a session's death by itself on the next boot. Machine facts
+// only — a coarse UA family and the event ring as JSON. There is NO
+// listener column on this table, by design: nothing here ties a
+// report to a person. Rows auto-expire 30 days after receipt.
+export const crashReports = sqliteTable("crash_reports", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  receivedAt: integer("received_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  uaFamily: text("ua_family").notNull(),
+  diedAt: integer("died_at").notNull(),
+  payload: text("payload").notNull(),
+});
+
 // Hearts: a listener's favorited tracks, keyed exactly the way plays are
 // logged (trackTitle + project). Purely personal — a heart never touches
 // score, state, or plays.
