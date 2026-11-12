@@ -9,6 +9,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { SafeAreaTopScrim } from "@hatch/space-sdk/client";
 import { api, type ApiResponse } from "./api";
 import { ARTIST, CATALOG } from "./catalog";
+import { judgeResume, RESUME_KEY, type ResumeSave } from "./resume";
 import { TapeRenderer } from "./tape";
 import {
   ensureFingerprint,
@@ -425,6 +426,12 @@ export function App() {
     lastAt: 0,
   });
   const hideFlushRef = useRef<{ trackIdx: number; at: number } | null>(null);
+  // Reopen save bookkeeping (2026-11-11): lastSaveRef dedupes the
+  // continuous writes (a write happens when the saved second, the
+  // banked second, or the playing flag moves — not on every tick);
+  // restoreTriedRef keeps the mount restore a one-shot.
+  const lastSaveRef = useRef<{ key: string; at: number }>({ key: "", at: 0 });
+  const restoreTriedRef = useRef(false);
   const isPlayingRef = useRef(false);
   const reconcileBusyRef = useRef(false);
   // Addendum 2 (owner, 2026-11-10): a stolen-audio episode. The flag is
@@ -643,6 +650,50 @@ export function App() {
     }
   }, [queryClient]);
 
+  // Durable now-playing save (2026-11-11, the reopen fix): while a
+  // track plays, continuously write down where it is — track, position,
+  // the honest seconds heard but not yet captured by a report
+  // (listenedRef IS that bank, by definition), and whether the
+  // listener left it playing or paused it himself. If the OS kills
+  // this page on a long dark run, the save is what the reopen finds.
+  // Because the bank written here is listenedRef itself, a report
+  // capture (which zeroes listenedRef synchronously, hide-flush
+  // included) is reflected in the very next write: seconds already
+  // claimed can never be claimed again by a restored play. Writes are
+  // deduped to when the saved second / banked second / playing flag
+  // actually moves, plus forced writes at the discrete moments that
+  // matter (pause, hide, pagehide, track change).
+  const persistResume = useCallback((force = false) => {
+    const idx = currentRef.current;
+    const audio = audioRef.current;
+    if (idx < 0 || !audio) return;
+    const tr = CATALOG[idx];
+    if (!tr) return;
+    const save: ResumeSave = {
+      v: 1,
+      title: tr.title,
+      project: tr.project,
+      src: tr.src,
+      pos: Math.max(0, audio.currentTime || 0),
+      dur:
+        isFinite(audio.duration) && audio.duration > 0
+          ? audio.duration
+          : (tr.durationSec ?? 0),
+      unreported: Math.max(0, listenedRef.current),
+      wasPlaying: isPlayingRef.current,
+      savedAt: Date.now(),
+    };
+    const key = `${idx}|${Math.floor(save.pos)}|${Math.round(save.unreported)}|${save.wasPlaying}`;
+    if (!force && key === lastSaveRef.current.key) return;
+    lastSaveRef.current = { key, at: save.savedAt };
+    try {
+      localStorage.setItem(RESUME_KEY, JSON.stringify(save));
+    } catch {
+      // Private mode: the save lives for this page only, reopen
+      // degrades to the old cold start. Never an error.
+    }
+  }, []);
+
   // Progress sampler: credit listened time from the audio element's
   // own clock, bounded by wall time elapsed since the last sample.
   // Called by the 250ms clock interval in the foreground AND by the
@@ -655,6 +706,9 @@ export function App() {
   const sampleProgress = useCallback((atEnded = false) => {
     const audio = audioRef.current;
     if (!audio) return;
+    // The save rides the sampler: every honest sample is also the
+    // moment the durable record of this play is freshest.
+    persistResume();
     if (!atEnded && (audio.paused || audio.ended)) return;
     const now = Date.now();
     const wall =
@@ -677,7 +731,7 @@ export function App() {
         errBurstRef.current = { count: 0, lastAt: 0 };
       }
     }
-  }, []);
+  }, [persistResume]);
 
   const pickNext = useCallback((): number => {
     if (CATALOG.length === 1) return 0;
@@ -792,9 +846,15 @@ export function App() {
       // This track is rolling: warm the one after it.
       preloadIdxRef.current = -1;
       preloadNext();
+      // A track change overwrites the reopen save on the spot: the
+      // outgoing song (finished, skipped, or stepped away from) is
+      // never what a reopen resurrects. audio.currentTime has just
+      // been reset by the src change and listenedRef zeroed above,
+      // so this writes the new track at its honest zero.
+      persistResume(true);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [updateMediaSession, preloadNext],
+    [updateMediaSession, preloadNext, persistResume],
   );
 
   // THE HANDOFF: report first, but never WAIT on the report.
@@ -886,6 +946,10 @@ export function App() {
       }
       // Any pause event ends a stolen-audio episode (see stolenRef).
       stolenRef.current = null;
+      // The pause is a fact the reopen must honor: write the save
+      // with the playing flag already down (isPlayingRef was cleared
+      // above), so a restored page never autoplays over his intent.
+      persistResume(true);
     });
     audio.addEventListener("playing", () => {
       // Real motion again: the watchdog stands down for this track.
@@ -917,7 +981,7 @@ export function App() {
     }
     return audio;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [advance, handleTrackError, sampleProgress]);
+  }, [advance, handleTrackError, sampleProgress, persistResume]);
 
   const restartTrack = useCallback(async () => {
     const audio = audioRef.current;
@@ -928,8 +992,9 @@ export function App() {
     sampleAtRef.current = Date.now();
     audio.currentTime = 0;
     tapeRef.current?.markChange();
+    persistResume(true);
     await audio.play().catch(() => undefined);
-  }, [reportPlay]);
+  }, [reportPlay, persistResume]);
 
   const startPlayback = useCallback(() => {
     const audio = ensureAudio();
@@ -1164,11 +1229,36 @@ export function App() {
           at: Date.now(),
         };
         void reportPlay(false);
+        // reportPlay captured the bank synchronously (listenedRef is
+        // already zeroed): the save written now can never resurrect
+        // seconds this flush just claimed.
+        persistResume(true);
       }
     };
     document.addEventListener("visibilitychange", onHide);
     return () => document.removeEventListener("visibilitychange", onHide);
-  }, [reportPlay]);
+  }, [reportPlay, persistResume]);
+
+  // Pagehide (2026-11-11): the kill itself. visibilitychange covers
+  // most departures, but a page torn down by the OS can reach pagehide
+  // with its bank unflushed. Bank exactly like the hide-flush does —
+  // capture first, then write the save with the claim already made —
+  // so a death loses at most the sub-5s tail, and claims nothing twice.
+  useEffect(() => {
+    const onPageHide = () => {
+      if (currentRef.current < 0) return;
+      if (listenedRef.current >= 5) {
+        hideFlushRef.current = {
+          trackIdx: currentRef.current,
+          at: Date.now(),
+        };
+        void reportPlay(false);
+      }
+      persistResume(true);
+    };
+    window.addEventListener("pagehide", onPageHide);
+    return () => window.removeEventListener("pagehide", onPageHide);
+  }, [reportPlay, persistResume]);
 
   // Foreground reconcile (mechanism A): on returning to the window, if
   // the UI believes it is playing but the element disagrees — another
@@ -1230,6 +1320,91 @@ export function App() {
       document.removeEventListener("visibilitychange", onVis);
       window.removeEventListener("focus", onFocus);
     };
+  }, []);
+
+  // --- Resume on reopen (2026-11-11) ------------------------------------------
+  // One shot, on mount: judge the durable save (./resume). A good save
+  // means the previous page died mid-song — OS kill on a long dark
+  // run, crash, torn-down tab. Instead of the cold shuffle a reopen
+  // used to serve, his song is cued at his position, the sampler
+  // baselines are anchored there (a restore is not a seek the wall
+  // clock should pay for), and the unreported bank rides back into
+  // listenedRef, where the play's one eventual report claims it —
+  // exactly once, alongside whatever he hears after the return.
+  // If he had left it playing, the page tries to hand the sound
+  // straight back; autoplay policy may refuse without a gesture, and
+  // then it simply rests, cued, on his song. If HE had paused it, no
+  // attempt is made at all: a user pause is sacred across a death too.
+  useEffect(() => {
+    if (restoreTriedRef.current) return;
+    restoreTriedRef.current = true;
+    let raw: string | null = null;
+    try {
+      raw = localStorage.getItem(RESUME_KEY);
+    } catch {
+      raw = null;
+    }
+    if (!raw) return;
+    const verdict = judgeResume(raw, Date.now(), (s) => {
+      let i = CATALOG.findIndex(
+        (t) => t.title === s.title && t.project === s.project,
+      );
+      if (i < 0) i = CATALOG.findIndex((t) => t.src === s.src);
+      return i;
+    });
+    if (!verdict.ok) {
+      // A save that may not come back (stale, finished, gone, corrupt)
+      // is cleared so it is never judged twice.
+      try {
+        localStorage.removeItem(RESUME_KEY);
+      } catch {
+        // Nothing to clear in a storage-less session.
+      }
+      return;
+    }
+    const { idx, save } = verdict;
+    const tr = CATALOG[idx];
+    if (!tr) return;
+    const audio = ensureAudio();
+    currentRef.current = idx;
+    listenedRef.current = save.unreported;
+    sessionListenedRef.current = save.unreported;
+    lastTimeRef.current = save.pos;
+    sampleAtRef.current = Date.now();
+    lastProgressRef.current = save.pos;
+    lastProgressAtRef.current = Date.now();
+    stallAttemptsRef.current = 0;
+    stallHintRef.current = false;
+    setNowIdx(idx);
+    setTrackClock({
+      elapsed: save.pos,
+      duration: save.dur || tr.durationSec || 0,
+    });
+    tapeRef.current?.markChange();
+    updateMediaSession(idx);
+    // The restored track's tape data rides the same lazy path as any
+    // load; playback never waits on it.
+    ensureFingerprint(tr.src);
+    const seek = () => {
+      try {
+        audio.currentTime = save.pos;
+      } catch {
+        // Not seekable yet: the baselines already sit at the saved
+        // position, so the sampler simply starts counting from
+        // wherever the element can begin.
+      }
+      lastTimeRef.current = save.pos;
+      audio.removeEventListener("loadedmetadata", seek);
+    };
+    audio.addEventListener("loadedmetadata", seek);
+    audio.src = tr.src;
+    setStarted(true);
+    if (save.wasPlaying) {
+      void audio.play().catch(() => undefined);
+    }
+    preloadIdxRef.current = -1;
+    preloadNext();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // --- Tape lifecycle -----------------------------------------------------------
