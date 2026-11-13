@@ -20,6 +20,7 @@ import {
   recEvent,
   recGoodbye,
   recHeartbeat,
+  recTickGap,
   type FlightSnap,
 } from "./recorder";
 import { TapeRenderer } from "./tape";
@@ -506,6 +507,12 @@ export function App() {
   const restoreTriedRef = useRef(false);
   const isPlayingRef = useRef(false);
   const reconcileBusyRef = useRef(false);
+  // Wake-side fix (2026-11-13): the stall evaluation and the wake
+  // return live in different effects than the ears that need them
+  // (the element's stall hints, the Page Lifecycle resume), so both
+  // are published through refs for any ear to invoke.
+  const stallEvalRef = useRef<(() => void) | null>(null);
+  const wakeEvalRef = useRef<(() => void) | null>(null);
   // Addendum 2 (owner, 2026-11-10): a stolen-audio episode. The flag is
   // raised when the UI claims playing but the element is paused while
   // VISIBLE (the interruption case — another app took the sound). While
@@ -1108,6 +1115,109 @@ export function App() {
     }, 1200);
   }, [reportPlay, pickNext, loadTrack]);
 
+  // THE STALL EVALUATION (extracted 2026-11-13, the wake-side fix).
+  // This is the ladder block the 250ms interval used to carry inline,
+  // lifted unchanged into a callback so stall supervision has more
+  // than one driver: the interval still calls it every tick, and the
+  // audio element's own waiting/stalled hints call it the moment the
+  // element complains, while the page is alive to hear them. Every
+  // rule inside is the ladder's own, preserved exactly: the cushion
+  // gate, the honest wall-clock freeze clock (the caller samples
+  // progress first where it can; the readings here are live either
+  // way), the stage timings, the probe-gated reload, the per-track
+  // reload cap. It never runs on a paused element — a user pause is
+  // sacred and no evaluation may speak over it.
+  const evaluateStall = useCallback(() => {
+    const audio = audioRef.current;
+    if (!audio || audio.paused || audio.ended) return;
+    if (currentRef.current < 0) return;
+    // CUSHION GATE (2026-11-12): with more than a second of audio in
+    // hand there is no stall to recover from — the ladder stands down
+    // entirely: no timing, no stages. A genuine network stall drains
+    // the cushion first; only then may a freeze start timing.
+    const nowMs = Date.now();
+    // FREEZE is wall-clock time since the playhead was last observed
+    // to move — lastProgressAtRef, stamped by the sampler. No
+    // position-vs-snapshot race: throttled background timers once
+    // desynced the two readings and the verdict cried frozen over a
+    // healthy song.
+    const frozenFor =
+      lastProgressAtRef.current > 0 ? nowMs - lastProgressAtRef.current : 0;
+    if (bufferedAhead() > 1 || frozenFor < 1000) {
+      // Cushion in hand, or motion observed within the last second:
+      // healthy. Stand down and reset.
+      ladderStageRef.current = 0;
+      ladderProbeRef.current = null;
+      return;
+    }
+    const stage = ladderStageRef.current;
+    const tr = CATALOG[currentRef.current];
+    if (frozenFor >= 17000 && stage < 4) {
+      ladderStageRef.current = 4;
+      recEvent("watchdog", { ...recSnap(), stage: 4 });
+      if (tr && ladderProbeRef.current?.ok && ladderReloadsRef.current < 2) {
+        ladderReloadsRef.current += 1;
+        const pos = lastProgressRef.current;
+        const resume = () => {
+          try {
+            audio.currentTime = pos;
+          } catch {
+            // Not seekable yet: play from wherever it lands.
+          }
+          audio.removeEventListener("loadedmetadata", resume);
+        };
+        audio.addEventListener("loadedmetadata", resume);
+        audio.src =
+          blobRef.current?.idx === currentRef.current
+            ? blobRef.current.url
+            : tr.src;
+        void audio.play().catch(() => undefined);
+        // A reload buys a fresh ladder window for this freeze.
+        lastProgressAtRef.current = nowMs;
+        ladderStageRef.current = 0;
+        ladderProbeRef.current = null;
+      } else {
+        // No proven network, or the reload cap is spent: the error
+        // path takes the track from here.
+        ladderStageRef.current = 0;
+        ladderProbeRef.current = null;
+        handleTrackError();
+      }
+    } else if (frozenFor >= 12000 && stage < 3) {
+      ladderStageRef.current = 3;
+      recEvent("watchdog", { ...recSnap(), stage: 3 });
+      if (tr && navigator.onLine) {
+        void fetch(tr.src, { method: "HEAD" })
+          .then((res) => {
+            ladderProbeRef.current = { ok: res.ok };
+          })
+          .catch(() => {
+            ladderProbeRef.current = { ok: false };
+          });
+      } else {
+        ladderProbeRef.current = { ok: false };
+      }
+    } else if (frozenFor >= 9000 && stage < 2) {
+      ladderStageRef.current = 2;
+      recEvent("watchdog", { ...recSnap(), stage: 2 });
+      try {
+        audio.currentTime = audio.currentTime + 0.05;
+      } catch {
+        // Not seekable: the nudge below still applies.
+      }
+      void audio.play().catch(() => undefined);
+    } else if (frozenFor >= 5000 && stage < 1) {
+      ladderStageRef.current = 1;
+      recEvent("watchdog", { ...recSnap(), stage: 1 });
+      void audio.play().catch(() => undefined);
+    }
+  }, [bufferedAhead, recSnap, handleTrackError]);
+
+  // Publish the evaluation for the ears that live in other effects.
+  useEffect(() => {
+    stallEvalRef.current = evaluateStall;
+  }, [evaluateStall]);
+
   const ensureAudio = useCallback(() => {
     if (audioRef.current) return audioRef.current;
     const audio = new Audio();
@@ -1172,6 +1282,11 @@ export function App() {
     const onStallHint = () => {
       stallHintRef.current = true;
       recEvent("stallhint", recSnap());
+      // The element's own distress signal is a supervisor tick too
+      // (2026-11-13): evaluate the stall right now instead of waiting
+      // for the interval's next beat. The evaluation's own gates
+      // decide whether anything is actually wrong.
+      stallEvalRef.current?.();
     };
     audio.addEventListener("stalled", onStallHint);
     audio.addEventListener("waiting", onStallHint);
@@ -1316,121 +1431,23 @@ export function App() {
         // observation, never before it.
         sampleProgress();
         const ct = audio.currentTime;
+        // The tick testifies about its own spacing (2026-11-13): if
+        // the page was suspended since the last beat, this writes the
+        // gap event before anything else reads the silence as data.
+        recTickGap(recSnap());
         recHeartbeat(recSnap());
         updatePositionState();
         // Prefetch runs on the cushion rule now: offer it every tick
         // and let preloadNext itself refuse until the playing track
         // has >= 15s buffered ahead.
         preloadNext();
-        // THE STALL LADDER (2026-11-11) — replaces the old watchdog,
-        // which reset audio.src on a stall: that tore down the
-        // connection, threw away good buffered audio, and stretched a
-        // short radio hiccup into seconds of dead air. The ladder
-        // escalates gently and touches the source only as a last,
-        // proven resort:
-        //   L0  0–4s frozen: do nothing. If buffered-ahead > 0.5s it
-        //       is not a network stall at all; browsers ride out most
-        //       freezes on their own.
-        //   L1  4–6s: a gentle play() nudge.
-        //   L2  8–10s: a micro-seek (+0.05s) to unstick the decoder.
-        //   L3  10–15s: an out-of-band HEAD probe of the file. Never
-        //       reloads anything; never fires while offline.
-        //   L4  15–20s+: hard src reload ONLY when the probe proved
-        //       the network can serve the file, capped at 2 per
-        //       track. Past the ladder, the error path takes it.
-        // A user pause never reaches here (paused branch below).
-        if (currentRef.current >= 0) {
-          // CUSHION GATE (2026-11-12): with more than a second of
-          // audio in hand there is no stall to recover from — the
-          // ladder stands down entirely: no timing, no stages. A
-          // genuine network stall drains the cushion first; only
-          // then may a freeze start timing. (Flight ring 22 caught
-          // the old ladder micro-seeking healthy tracks holding
-          // 46–272s of buffer, chopping the songs itself.)
-          const nowMs = Date.now();
-          // FREEZE is wall-clock time since the playhead was last
-          // observed to move — lastProgressAtRef, stamped by the
-          // sampler at the top of this same tick. No position-vs-
-          // snapshot race: throttled background timers once desynced
-          // the two readings and the verdict cried frozen over a
-          // healthy song.
-          const frozenFor =
-            lastProgressAtRef.current > 0
-              ? nowMs - lastProgressAtRef.current
-              : 0;
-          if (bufferedAhead() > 1 || frozenFor < 1000) {
-            // Cushion in hand, or motion observed within the last
-            // second: healthy. Stand down and reset.
-            ladderStageRef.current = 0;
-            ladderProbeRef.current = null;
-          } else {
-            const stage = ladderStageRef.current;
-            const tr = CATALOG[currentRef.current];
-            if (frozenFor >= 17000 && stage < 4) {
-              ladderStageRef.current = 4;
-              recEvent("watchdog", { ...recSnap(), stage: 4 });
-              if (
-                tr &&
-                ladderProbeRef.current?.ok &&
-                ladderReloadsRef.current < 2
-              ) {
-                ladderReloadsRef.current += 1;
-                const pos = lastProgressRef.current;
-                const resume = () => {
-                  try {
-                    audio.currentTime = pos;
-                  } catch {
-                    // Not seekable yet: play from wherever it lands.
-                  }
-                  audio.removeEventListener("loadedmetadata", resume);
-                };
-                audio.addEventListener("loadedmetadata", resume);
-                audio.src =
-                  blobRef.current?.idx === currentRef.current
-                    ? blobRef.current.url
-                    : tr.src;
-                void audio.play().catch(() => undefined);
-                // A reload buys a fresh ladder window for this freeze.
-                lastProgressAtRef.current = nowMs;
-                ladderStageRef.current = 0;
-                ladderProbeRef.current = null;
-              } else {
-                // No proven network, or the reload cap is spent: the
-                // error path takes the track from here.
-                ladderStageRef.current = 0;
-                ladderProbeRef.current = null;
-                handleTrackError();
-              }
-            } else if (frozenFor >= 12000 && stage < 3) {
-              ladderStageRef.current = 3;
-              recEvent("watchdog", { ...recSnap(), stage: 3 });
-              if (tr && navigator.onLine) {
-                void fetch(tr.src, { method: "HEAD" })
-                  .then((res) => {
-                    ladderProbeRef.current = { ok: res.ok };
-                  })
-                  .catch(() => {
-                    ladderProbeRef.current = { ok: false };
-                  });
-              } else {
-                ladderProbeRef.current = { ok: false };
-              }
-            } else if (frozenFor >= 9000 && stage < 2) {
-              ladderStageRef.current = 2;
-              recEvent("watchdog", { ...recSnap(), stage: 2 });
-              try {
-                audio.currentTime = ct + 0.05;
-              } catch {
-                // Not seekable: the nudge below still applies.
-              }
-              void audio.play().catch(() => undefined);
-            } else if (frozenFor >= 5000 && stage < 1) {
-              ladderStageRef.current = 1;
-              recEvent("watchdog", { ...recSnap(), stage: 1 });
-              void audio.play().catch(() => undefined);
-            }
-          }
-        }
+        // THE STALL LADDER lives in evaluateStall now (extracted
+        // 2026-11-13, the wake-side fix) — the same evaluation the
+        // element's stall hints invoke directly. Its header tells the
+        // ladder's whole story: the cushion gate, the honest freeze
+        // clock, the gentle rungs, the probe-gated reload. A user
+        // pause never reaches here (paused branch below).
+        evaluateStall();
         // Near the end: make sure the next file is warm. Normally
         // loadTrack already aimed the preload; this catches the bag
         // having changed under us (a manual jump filtered a track).
@@ -1518,7 +1535,7 @@ export function App() {
       }
     }, 250);
     return () => window.clearInterval(t);
-  }, [started, nowTrack, sampleProgress, preloadNext]);
+  }, [started, nowTrack, sampleProgress, preloadNext, evaluateStall]);
 
   // Flush the in-progress play if the page goes away mid-track.
   useEffect(() => {
@@ -1567,16 +1584,37 @@ export function App() {
     return () => window.removeEventListener("pagehide", onPageHide);
   }, [reportPlay, persistResume, recSnap]);
 
-  // Foreground reconcile (mechanism A): on returning to the window, if
-  // the UI believes it is playing but the element disagrees — another
-  // app stole the phone's audio, or the element froze while suspended —
-  // settle against reality. Never errors, never advances, never touches
-  // the stall watchdog; one recovery attempt at most, then calm.
+  // Foreground reconcile (mechanism A) + THE WAKE-SIDE CLIMB
+  // (2026-11-13). On returning to the window, if the UI believes it
+  // is playing but the element disagrees — another app stole the
+  // phone's audio, or the element froze while suspended — settle
+  // against reality. Never errors, never advances.
+  //
+  // The 2026-11-13 diagnosis named why the old reconcile was not
+  // enough: every supervisor lives on the 250ms interval, and a
+  // hidden, silenced page can lose that interval for minutes — the
+  // ladder never got the chance to be wrong, it never ran. The wake
+  // is therefore a tick in its own right, and the reconcile may now
+  // climb the ladder's CHEAP RUNGS on return: the first play()
+  // attempt it always made, then — if the playhead is still frozen
+  // after a short window — another play() nudge (L1), then the L2
+  // micro-seek. The hard rungs stay where they belong: L4's reload
+  // fires only through the interval ladder with its proven-network
+  // gate, never on wake alone. Baselines are re-anchored first, as
+  // they always were, so every reading after a suspension is honest.
+  // A user pause is sacred throughout: the UI wanting playback is
+  // the entry gate, and every rung re-checks it before acting.
   useEffect(() => {
+    const WAKE_CHECK_MS = 1500;
+    let timers: number[] = [];
+    const later = (fn: () => void, ms: number) => {
+      timers.push(window.setTimeout(fn, ms));
+    };
     const reconcile = () => {
       if (reconcileBusyRef.current) return;
       const audio = audioRef.current;
       if (!audio || currentRef.current < 0 || !isPlayingRef.current) return;
+      const trackIdx = currentRef.current;
       const stalled =
         Date.now() - lastProgressAtRef.current > 4000 &&
         audio.currentTime <= lastProgressRef.current + 0.05;
@@ -1596,7 +1634,7 @@ export function App() {
       ladderStageRef.current = 0;
       ladderProbeRef.current = null;
       const marker = hideFlushRef.current;
-      if (marker && marker.trackIdx === currentRef.current) {
+      if (marker && marker.trackIdx === trackIdx) {
         // This play was already banked by the hide-flush: just settle
         // at the element's true position, no resume, no report.
         hideFlushRef.current = null;
@@ -1605,30 +1643,95 @@ export function App() {
         reconcileBusyRef.current = false;
         return;
       }
-      // One recovery attempt at the element's own position.
+      const anchorCt = audio.currentTime;
+      // Motion again means the return healed itself: stand down.
+      // (The sampler keeps lastProgressAtRef honest, but the direct
+      // position read here is the wake path's own witness.) A fat
+      // cushion AND resumed progress is the cushion gate's stand-down
+      // in its own terms; progress alone ends the climb regardless —
+      // a moving playhead is not a stall.
+      const resumed = () =>
+        currentRef.current !== trackIdx ||
+        !isPlayingRef.current ||
+        (!audio.paused && audio.currentTime > anchorCt + 0.05);
+      const settleCalm = () => {
+        lastTimeRef.current = audio.currentTime;
+        setIsPlaying(false);
+        setLastAward("THAT TRACK WON'T PLAY — PRESS PLAY TO TRY AGAIN");
+        window.setTimeout(() => setLastAward(null), 5000);
+        reconcileBusyRef.current = false;
+      };
+      const climbL2 = () => {
+        if (resumed()) {
+          reconcileBusyRef.current = false;
+          return;
+        }
+        // L2, the micro-seek: unstick the decoder, then play.
+        ladderStageRef.current = Math.max(ladderStageRef.current, 2);
+        recEvent("watchdog", { ...recSnap(), stage: 2, note: "wake" });
+        try {
+          audio.currentTime = audio.currentTime + 0.05;
+        } catch {
+          // Not seekable: the nudge below still applies.
+        }
+        void audio.play().catch(() => undefined);
+        later(() => {
+          if (resumed()) {
+            reconcileBusyRef.current = false;
+            return;
+          }
+          // The cheap rungs are spent. Settle calm on this track,
+          // per mechanism A; if the element is still unpaused and
+          // frozen, the interval ladder — awake now — owns whatever
+          // harder judgment comes next, probe gate and all.
+          settleCalm();
+        }, WAKE_CHECK_MS);
+      };
+      const climbL1 = () => {
+        if (resumed()) {
+          reconcileBusyRef.current = false;
+          return;
+        }
+        // L1, the gentle nudge, one rung up from the first attempt.
+        ladderStageRef.current = Math.max(ladderStageRef.current, 1);
+        recEvent("watchdog", { ...recSnap(), stage: 1, note: "wake" });
+        void audio.play().catch(() => undefined);
+        later(climbL2, WAKE_CHECK_MS);
+      };
+      // One recovery attempt at the element's own position — the
+      // attempt this reconcile always made. Its promise resolving is
+      // not proof of motion, so the climb checks the playhead itself
+      // a short window later.
       void audio
         .play()
         .then(() => {
-          reconcileBusyRef.current = false;
+          later(climbL1, WAKE_CHECK_MS);
         })
         .catch(() => {
           // Focus/autoplay policy says no: settle calm on this track.
-          lastTimeRef.current = audio.currentTime;
-          setIsPlaying(false);
-          setLastAward("THAT TRACK WON'T PLAY — PRESS PLAY TO TRY AGAIN");
-          window.setTimeout(() => setLastAward(null), 5000);
-          reconcileBusyRef.current = false;
+          settleCalm();
         });
     };
-    const onVis = () => {
-      if (document.visibilityState === "visible") reconcile();
+    wakeEvalRef.current = reconcile;
+    const onWake = () => {
+      // The wake testifies first: if the page was suspended, the gap
+      // event lands now, not at the interval's next throttled beat.
+      recTickGap(recSnap());
+      reconcile();
     };
-    const onFocus = () => reconcile();
+    const onVis = () => {
+      if (document.visibilityState === "visible") onWake();
+    };
+    const onResume = () => onWake();
     document.addEventListener("visibilitychange", onVis);
-    window.addEventListener("focus", onFocus);
+    document.addEventListener("resume", onResume);
+    window.addEventListener("focus", onWake);
     return () => {
       document.removeEventListener("visibilitychange", onVis);
-      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("resume", onResume);
+      window.removeEventListener("focus", onWake);
+      timers.forEach((id) => window.clearTimeout(id));
+      timers = [];
     };
   }, []);
 
@@ -1651,7 +1754,14 @@ export function App() {
     const snap = () => recSnap();
     const onVis = () => recEvent("visibility", snap());
     const onFreeze = () => recEvent("freeze", snap());
-    const onResume = () => recEvent("resume", snap());
+    const onResume = () => {
+      recEvent("resume", snap());
+      // A resumed page is a woken page (2026-11-13): run the wake
+      // evaluation now — gap testimony plus the reconcile's climb —
+      // instead of waiting for a visibility change that may never
+      // come (a frozen page can resume while already visible).
+      wakeEvalRef.current?.();
+    };
     const onShow = (ev: PageTransitionEvent) =>
       recEvent("pageshow", { ...snap(), note: ev.persisted ? "persisted" : "fresh" });
     const onOnline = () =>

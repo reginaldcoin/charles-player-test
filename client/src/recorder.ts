@@ -40,6 +40,9 @@ export type FlightEvent = {
   paused?: boolean;
   /** Watchdog ladder stage, for watchdog events. */
   stage?: number;
+  /** For gap events: the wall-clock ms since the previous supervisor
+   *  tick — the size of the hole a suspension tore in the record. */
+  gapMs?: number;
   /** Navigation type / wasDiscarded / persisted pageshow flag. */
   note?: string;
 }
@@ -111,7 +114,7 @@ export function uaFamily(ua: string): string {
 
 export function recEvent(
   e: string,
-  snap?: Partial<FlightSnap> & { stage?: number; note?: string },
+  snap?: Partial<FlightSnap> & { stage?: number; note?: string; gapMs?: number },
 ): void {
   const ev: FlightEvent = {
     t: Date.now(),
@@ -128,6 +131,7 @@ export function recEvent(
     if (snap.ns !== undefined) ev.ns = snap.ns;
     if (snap.paused !== undefined) ev.paused = snap.paused;
     if (snap.stage !== undefined) ev.stage = snap.stage;
+    if (snap.gapMs !== undefined) ev.gapMs = snap.gapMs;
     if (snap.note !== undefined) ev.note = snap.note;
   }
   ring.push(ev);
@@ -141,6 +145,34 @@ export function recHeartbeat(snap: FlightSnap): void {
   if (now - lastHeartbeatAt < HEARTBEAT_MS) return;
   lastHeartbeatAt = now;
   recEvent("heartbeat", snap);
+}
+
+// GAP EVENTS (2026-11-13, the wake-side fix). The supervisor ticks on
+// a timer, and a suspended page stops ticking entirely — the freeze
+// that killed the session leaves no trace in the ring, because the
+// ring only hears from the ticks that ran. So every tick now reports
+// its own spacing: when the wall-clock delta since the previous tick
+// exceeds the threshold, the tick writes a gap event carrying the
+// delta before doing anything else. A suspension leaves testimony
+// even when the session survives it and no death report ever files.
+const GAP_THRESHOLD_MS = 2000;
+let lastTickAt = 0;
+
+/** Observe a supervisor tick. Returns the ms since the previous
+ *  tick (0 on the first observation). Callers: the 250ms interval,
+ *  and the wake path (so a return records its gap immediately,
+ *  before the interval's next beat — the re-stamp here means that
+ *  beat then sees a small delta and writes nothing twice). */
+export function recTickGap(snap?: Partial<FlightSnap>): number {
+  const now = Date.now();
+  const prev = lastTickAt;
+  lastTickAt = now;
+  if (prev <= 0) return 0;
+  const delta = now - prev;
+  if (delta > GAP_THRESHOLD_MS) {
+    recEvent("gap", { ...snap, gapMs: delta });
+  }
+  return delta;
 }
 
 /**
