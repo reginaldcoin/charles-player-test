@@ -8,6 +8,11 @@ import {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { SafeAreaTopScrim } from "@hatch/space-sdk/client";
 import { api, type ApiResponse } from "./api";
+import {
+  createHeartToggleCore,
+  type HeartArgs,
+  type HeartToggleCore,
+} from "./heartToggle";
 import { ARTIST, CATALOG } from "./catalog";
 import { judgeResume, RESUME_KEY, type ResumeSave } from "./resume";
 import {
@@ -191,21 +196,61 @@ function HeartIcon({ size = 18 }: { size?: number }) {
 }
 
 /**
+ * Wires the heart toggle core (heartToggle.ts) to the API. One core
+ * per surface: the now-playing heart and the road hearts each own
+ * their pending state. A save counts as failed on a transport error
+ * OR an ok:false answer, and the send resolves only after the road
+ * refetch lands, so when the core clears its optimistic override the
+ * display hands over to the server's fresh truth with no stale flash.
+ */
+function useHeartToggle(
+  getToken: () => string | undefined,
+): HeartToggleCore {
+  const queryClient = useQueryClient();
+  const [, setTick] = useState(0);
+  const getTokenRef = useRef(getToken);
+  getTokenRef.current = getToken;
+  const coreRef = useRef<HeartToggleCore | null>(null);
+  if (coreRef.current === null) {
+    coreRef.current = createHeartToggleCore(
+      async (args: HeartArgs) => {
+        const token = getTokenRef.current();
+        if (!token) throw new Error("Not signed in.");
+        const res = await api.toggleFavorite({ token, ...args });
+        if (!res.ok) throw new Error(res.error ?? "The heart did not save.");
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: ["road"] }),
+          queryClient.invalidateQueries({ queryKey: ["hearts-today"] }),
+          queryClient.invalidateQueries({ queryKey: ["love-board"] }),
+        ]);
+      },
+      () => setTick((t) => t + 1),
+    );
+  }
+  return coreRef.current;
+}
+
+/**
  * The heart, drawn not typed: an SVG silhouette (Press Start 2P has no
  * heart glyph, so the old text heart fell back to a tiny system glyph
  * and its on/off state read as a dim color swap). OFF is a white
  * outline; ON is a solid accent fill with the white outline kept —
- * more present, never darker. Turning ON (and only ON, and only after
- * the toggle lands) pops the heart and throws pixel sparkles.
+ * more present, never darker. The fill and the HEARTED label follow
+ * the displayed state, which is optimistic: they flip the moment a
+ * tap lands. The pop and the pixel sparkles still wait for the save:
+ * they fire when the SAVED state turns on under a click we made, so
+ * a failed toggle never celebrates.
  */
 function HeartButton({
   hearted,
+  savedHearted,
   pending,
   onToggle,
   label,
   size,
 }: {
   hearted: boolean;
+  savedHearted: boolean;
   pending: boolean;
   onToggle: () => void;
   label: string;
@@ -215,15 +260,17 @@ function HeartButton({
   const [burstKey, setBurstKey] = useState(0);
   const awaitingRef = useRef(false);
 
-  // Fire the burst when a click we made turns the heart ON. A failed
-  // toggle never flips `hearted`, so it never bursts; the awaiting
-  // flag expires on its own so an unrelated later flip stays quiet.
+  // Fire the burst when a click we made turns the SAVED heart ON. The
+  // displayed state flips optimistically and cannot be trusted for
+  // this; a failed save never flips the saved state, so it never
+  // bursts. The awaiting flag expires on its own so an unrelated later
+  // flip stays quiet.
   useEffect(() => {
-    if (hearted && awaitingRef.current) {
+    if (savedHearted && awaitingRef.current) {
       awaitingRef.current = false;
       setBurstKey((k) => k + 1);
     }
-  }, [hearted]);
+  }, [savedHearted]);
 
   const handleClick = () => {
     if (!hearted) {
@@ -538,15 +585,7 @@ export function App() {
     enabled: birthdayToday,
     refetchInterval: 30000,
   });
-  const heartNow = useMutation({
-    mutationFn: (args: { trackTitle: string; project: string }) =>
-      api.toggleFavorite({ token: identityRef.current!.token, ...args }),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["road"] });
-      void queryClient.invalidateQueries({ queryKey: ["hearts-today"] });
-      void queryClient.invalidateQueries({ queryKey: ["love-board"] });
-    },
-  });
+  const heartNow = useHeartToggle(() => identityRef.current?.token);
   const nowHearted =
     !!nowTrack &&
     !!roadLite.data?.favorites.some(
@@ -1941,18 +1980,31 @@ export function App() {
               {identity && nowTrack && (
                 <HeartButton
                   size="now"
-                  hearted={nowHearted}
-                  pending={heartNow.isPending}
+                  hearted={heartNow.display(nowHearted, {
+                    trackTitle: nowTrack.title,
+                    project: nowTrack.project,
+                  })}
+                  savedHearted={nowHearted}
+                  pending={heartNow.isPending({
+                    trackTitle: nowTrack.title,
+                    project: nowTrack.project,
+                  })}
                   label={
-                    nowHearted
+                    heartNow.display(nowHearted, {
+                      trackTitle: nowTrack.title,
+                      project: nowTrack.project,
+                    })
                       ? `Unheart ${nowTrack.title}`
                       : `Heart ${nowTrack.title}`
                   }
                   onToggle={() =>
-                    heartNow.mutate({
-                      trackTitle: nowTrack.title,
-                      project: nowTrack.project,
-                    })
+                    heartNow.toggle(
+                      {
+                        trackTitle: nowTrack.title,
+                        project: nowTrack.project,
+                      },
+                      nowHearted,
+                    )
                   }
                 />
               )}
@@ -2665,15 +2717,7 @@ function MyRoad({
     },
   });
 
-  const heart = useMutation({
-    mutationFn: (args: { trackTitle: string; project: string }) =>
-      api.toggleFavorite({ token: identity.token, ...args }),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["road"] });
-      void queryClient.invalidateQueries({ queryKey: ["hearts-today"] });
-      void queryClient.invalidateQueries({ queryKey: ["love-board"] });
-    },
-  });
+  const heart = useHeartToggle(() => identity.token);
 
   if (road.isPending) {
     return (
@@ -2853,18 +2897,28 @@ function MyRoad({
                 </button>
                 <HeartButton
                   size="row"
-                  hearted={p.hearted}
-                  pending={heart.isPending}
+                  hearted={heart.display(p.hearted, {
+                    trackTitle: p.trackTitle,
+                    project: p.project,
+                  })}
+                  savedHearted={p.hearted}
+                  pending={heart.isPending({
+                    trackTitle: p.trackTitle,
+                    project: p.project,
+                  })}
                   label={
-                    p.hearted
+                    heart.display(p.hearted, {
+                      trackTitle: p.trackTitle,
+                      project: p.project,
+                    })
                       ? `Unheart ${p.trackTitle}`
                       : `Heart ${p.trackTitle}`
                   }
                   onToggle={() =>
-                    heart.mutate({
-                      trackTitle: p.trackTitle,
-                      project: p.project,
-                    })
+                    heart.toggle(
+                      { trackTitle: p.trackTitle, project: p.project },
+                      p.hearted,
+                    )
                   }
                 />
                 <button
@@ -2914,14 +2968,28 @@ function MyRoad({
                 </button>
                 <HeartButton
                   size="row"
-                  hearted={true}
-                  pending={heart.isPending}
-                  label={`Unheart ${f.trackTitle}`}
-                  onToggle={() =>
-                    heart.mutate({
+                  hearted={heart.display(true, {
+                    trackTitle: f.trackTitle,
+                    project: f.project,
+                  })}
+                  savedHearted={true}
+                  pending={heart.isPending({
+                    trackTitle: f.trackTitle,
+                    project: f.project,
+                  })}
+                  label={
+                    heart.display(true, {
                       trackTitle: f.trackTitle,
                       project: f.project,
                     })
+                      ? `Unheart ${f.trackTitle}`
+                      : `Heart ${f.trackTitle}`
+                  }
+                  onToggle={() =>
+                    heart.toggle(
+                      { trackTitle: f.trackTitle, project: f.project },
+                      true,
+                    )
                   }
                 />
               </li>
