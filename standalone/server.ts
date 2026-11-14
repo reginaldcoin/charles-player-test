@@ -18,6 +18,7 @@ import { Actions } from "../server/src/actions";
 import { handlers as privilegedHandlers } from "../server/src/privileged";
 import * as schema from "../server/src/schema";
 import { createFingerprintHandler } from "./fingerprint-route";
+import { createSongPageHandler } from "./song-route";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PORT = Number(process.env.PORT ?? 3000);
@@ -265,6 +266,7 @@ async function handleAction(req: Request): Promise<Response> {
 }
 
 const handleFingerprint = createFingerprintHandler(dirname(DB_PATH));
+const handleSongPage = createSongPageHandler(CLIENT_DIST);
 
 Bun.serve({
   port: PORT,
@@ -281,6 +283,10 @@ Bun.serve({
         return Response.json({ error: "POST only" }, { status: 405 });
       }
       return handleAction(req);
+    }
+    if (req.method === "GET" && url.pathname.startsWith("/s/")) {
+      const res = handleSongPage(url);
+      if (res) return res;
     }
     if (req.method === "GET" || req.method === "HEAD") {
       const res = serveStatic(url.pathname);

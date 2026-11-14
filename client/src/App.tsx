@@ -13,7 +13,12 @@ import {
   type HeartArgs,
   type HeartToggleCore,
 } from "./heartToggle";
-import { ARTIST, CATALOG } from "./catalog";
+import { ARTIST, CATALOG, type CatalogTrack } from "./catalog";
+import {
+  isSongPath,
+  songIndexFromPath,
+  songPath,
+} from "./songSlug";
 import { judgeResume, RESUME_KEY, type ResumeSave } from "./resume";
 import {
   recBoot,
@@ -236,6 +241,7 @@ function useHeartToggle(
           queryClient.invalidateQueries({ queryKey: ["road"] }),
           queryClient.invalidateQueries({ queryKey: ["hearts-today"] }),
           queryClient.invalidateQueries({ queryKey: ["love-board"] }),
+          queryClient.invalidateQueries({ queryKey: ["song-stats"] }),
         ]);
       },
       () => setTick((t) => t + 1),
@@ -268,9 +274,9 @@ function HeartButton({
   pending: boolean;
   onToggle: () => void;
   label: string;
-  size: "now" | "row";
+  size: "now" | "row" | "page";
 }) {
-  const glyph = size === "now" ? 36 : 26;
+  const glyph = size === "page" ? 96 : size === "now" ? 36 : 26;
   const [burstKey, setBurstKey] = useState(0);
   const awaitingRef = useRef(false);
 
@@ -306,9 +312,11 @@ function HeartButton({
         onClick={handleClick}
         disabled={pending}
         className={
-          size === "now"
-            ? "shrink-0 px-3 py-2 leading-none"
-            : "shrink-0 px-2 py-2 leading-none"
+          size === "page"
+            ? "shrink-0 px-4 py-3 leading-none"
+            : size === "now"
+              ? "shrink-0 px-3 py-2 leading-none"
+              : "shrink-0 px-2 py-2 leading-none"
         }
       >
         <span
@@ -333,7 +341,7 @@ function HeartButton({
           </svg>
           {burstKey > 0 && (
             <span key={`s${burstKey}`} className="heart-sparks" aria-hidden>
-              {HEART_SPARKS.slice(0, size === "now" ? 12 : 8).map((s, i) => (
+              {HEART_SPARKS.slice(0, size === "row" ? 8 : 12).map((s, i) => (
                 <span
                   key={i}
                   className="heart-spark"
@@ -352,7 +360,7 @@ function HeartButton({
           )}
         </span>
       </button>
-      {size === "now" && hearted && (
+      {size !== "row" && hearted && (
         <span
           className="font-pixel text-[9px] tracking-[0.18em]"
           style={{ color: "var(--accent)" }}
@@ -433,7 +441,7 @@ function loadIdentity(): Identity | null {
   }
 }
 
-type View = "player" | "standings" | "road" | "backroom";
+type View = "player" | "standings" | "road" | "backroom" | "song";
 
 type BoardData = ApiResponse<typeof api, "getBoard">;
 type LoveBoardData = ApiResponse<typeof api, "getLoveBoard">;
@@ -446,7 +454,20 @@ type TrackBoardData = ApiResponse<typeof api, "getTrackBoard">;
 
 export function App() {
   const queryClient = useQueryClient();
-  const [view, setView] = useState<View>("player");
+  // A cold open on a song address (/s/<slug>) lands on that song's page,
+  // not the player home: the boot view and the boot song both read the
+  // path the page was served under. An unresolvable slug still opens
+  // the song view, which renders its own "not here" state.
+  const [view, setView] = useState<View>(() =>
+    isSongPath(window.location.pathname) ? "song" : "player",
+  );
+  const [songIdx, setSongIdx] = useState<number>(() =>
+    songIndexFromPath(window.location.pathname),
+  );
+  // A guest who taps PLAY or the heart on a song page is routed through
+  // the claim flow with the song held here; handleClaimed picks the
+  // intent up the moment the name lands.
+  const songIntentRef = useRef<{ idx: number; play: boolean } | null>(null);
   const [identity, setIdentity] = useState<Identity | null>(loadIdentity);
   const [roomMode, setRoomMode] = useState(false);
 
@@ -611,6 +632,59 @@ export function App() {
     !!roadLite.data?.favorites.some(
       (f) => f.trackTitle === nowTrack.title && f.project === nowTrack.project,
     );
+
+  // The song page's heart: its own toggle core (one per surface, like
+  // the now-playing heart), its saved state read from the same road
+  // favorites the now-playing heart reads.
+  const songTrack = songIdx >= 0 ? CATALOG[songIdx] : undefined;
+  const heartSong = useHeartToggle(() => identityRef.current?.token);
+  const songHearted =
+    !!songTrack &&
+    !!roadLite.data?.favorites.some(
+      (f) => f.trackTitle === songTrack.title && f.project === songTrack.project,
+    );
+
+  const openSong = useCallback((idx: number) => {
+    setSongIdx(idx);
+    setView("song");
+  }, []);
+
+  // The address bar follows the song view: a song page is a real,
+  // copyable address, and leaving the view restores the plain root.
+  useEffect(() => {
+    const path = window.location.pathname;
+    if (view === "song" && songIdx >= 0) {
+      const target = songPath(songIdx);
+      if (path !== target) window.history.pushState(null, "", target);
+    } else if (view !== "song" && isSongPath(path)) {
+      window.history.pushState(null, "", "/");
+    }
+  }, [view, songIdx]);
+
+  // Back/forward across song addresses re-opens what the address names.
+  useEffect(() => {
+    const onPop = () => {
+      const path = window.location.pathname;
+      if (isSongPath(path)) {
+        setSongIdx(songIndexFromPath(path));
+        setView("song");
+      } else {
+        setView((v) => (v === "song" ? "player" : v));
+      }
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  // The tab names the song while its page is open (the served share
+  // metadata already does for cold opens; this keeps in-app arrivals
+  // honest too).
+  useEffect(() => {
+    document.title =
+      view === "song" && songTrack
+        ? `${songTrack.title} — Charles Hamilton · ${songTrack.project}`
+        : "Charles Hamilton Player";
+  }, [view, songTrack]);
 
   // --- Wake lock ---------------------------------------------------------------
   const requestWakeLock = useCallback(async () => {
@@ -1927,6 +2001,36 @@ export function App() {
     tapeRef.current?.setPlaying(isPlaying);
   }, [isPlaying]);
 
+  // --- Song page intents ---------------------------------------------------------
+  // PLAY on a song page: a signed-in listener starts the song at once,
+  // down the same engine path Recent Plays rows use. A guest is routed
+  // through the claim flow with the song held as an intent, and the
+  // song starts the moment the claim lands (handleClaimed, below).
+  const playSongPage = useCallback(() => {
+    if (songIdx < 0) return;
+    if (identityRef.current) {
+      void playCatalogIndex(songIdx);
+    } else {
+      songIntentRef.current = { idx: songIdx, play: true };
+      setView("road");
+    }
+  }, [songIdx, playCatalogIndex]);
+
+  // The song page's heart: signed in, the toggle itself; a guest is
+  // routed through the claim flow and returned to the page.
+  const heartSongPage = useCallback(() => {
+    if (!songTrack) return;
+    if (identityRef.current) {
+      heartSong.toggle(
+        { trackTitle: songTrack.title, project: songTrack.project },
+        songHearted,
+      );
+    } else if (songIdx >= 0) {
+      songIntentRef.current = { idx: songIdx, play: false };
+      setView("road");
+    }
+  }, [songTrack, songIdx, heartSong, songHearted]);
+
   // --- Identity -----------------------------------------------------------------
   const handleClaimed = useCallback(
     (id: Identity) => {
@@ -1941,8 +2045,21 @@ export function App() {
       // otherwise linger up to the refetch interval and read as "still
       // signed out" seconds after a successful sign-in).
       void queryClient.invalidateQueries({ queryKey: ["road"] });
+      // A song page sent this guest here with a song in hand: honor
+      // the intent now that the name has landed — start the song, or
+      // return to its page when the errand was the heart.
+      const intent = songIntentRef.current;
+      if (intent) {
+        songIntentRef.current = null;
+        if (intent.play) {
+          void playCatalogIndex(intent.idx);
+        } else {
+          setSongIdx(intent.idx);
+          setView("song");
+        }
+      }
     },
-    [queryClient],
+    [queryClient, playCatalogIndex],
   );
 
   const handleSignOut = useCallback(async () => {
@@ -2150,6 +2267,20 @@ export function App() {
               <span>{fmtTime(trackClock.elapsed)}</span>
               <span>{fmtTime(trackClock.duration)}</span>
             </div>
+            {nowTrack && (
+              <p className="mt-3">
+                <a
+                  href={songPath(nowIdx)}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    openSong(nowIdx);
+                  }}
+                  className="font-data text-[11px] uppercase tracking-[0.12em] underline underline-offset-4"
+                >
+                  This song&rsquo;s page →
+                </a>
+              </p>
+            )}
             {started && (
               <div className="mt-4 flex items-baseline justify-between border-t border-[var(--border)] pt-3">
                 <p className="font-data text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
@@ -2289,6 +2420,29 @@ export function App() {
               welcomeBackName={identity?.name}
             />
           ))}
+
+        {/* ============================ SONG PAGE ============================ */}
+        {view === "song" && (
+          <SongPage
+            track={songTrack}
+            guest={!identity}
+            hearted={heartSong.display(songHearted, {
+              trackTitle: songTrack?.title ?? "",
+              project: songTrack?.project ?? "",
+            })}
+            savedHearted={songHearted}
+            heartPending={
+              !!songTrack &&
+              heartSong.isPending({
+                trackTitle: songTrack.title,
+                project: songTrack.project,
+              })
+            }
+            onHeart={heartSongPage}
+            onPlay={playSongPage}
+            onBack={() => setView("player")}
+          />
+        )}
 
         {/* ============================ ADMIN PANEL ============================ */}
         {view === "backroom" &&
@@ -2681,6 +2835,146 @@ function MostLoved({
           </ol>
         </>
       )}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// SONG PAGE — one song's postcard: its name, its project, its hearts and
+// plays, the heart itself at the center, and a PLAY that starts this
+// song. Reached cold from a shared /s/<slug> address or in-app from the
+// now-playing link. Guests meet the same page; PLAY and the heart route
+// them through the claim flow (see the intents in App).
+// ---------------------------------------------------------------------------
+
+function SongPage({
+  track,
+  guest,
+  hearted,
+  savedHearted,
+  heartPending,
+  onHeart,
+  onPlay,
+  onBack,
+}: {
+  track: CatalogTrack | undefined;
+  guest: boolean;
+  hearted: boolean;
+  savedHearted: boolean;
+  heartPending: boolean;
+  onHeart: () => void;
+  onPlay: () => void;
+  onBack: () => void;
+}) {
+  const stats = useQuery({
+    queryKey: ["song-stats", track?.title, track?.project],
+    queryFn: () =>
+      api.getSongStats({
+        trackTitle: track!.title,
+        project: track!.project,
+      }),
+    enabled: !!track,
+  });
+  const [copied, setCopied] = useState(false);
+  const copyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard refused: the address bar still holds the link.
+    }
+  };
+
+  return (
+    <section aria-label="Song page" className="px-4 pt-4">
+      <div className="nes-container with-title px-5 pb-6 pt-4">
+        <p className="title font-pixel text-[11px]">POSTCARD</p>
+        {track ? (
+          <>
+            <p className="font-data mt-2 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+              {track.project}
+            </p>
+            <h2 className="font-pixel mt-3 break-words text-[30px] leading-[1.15] sm:text-[44px]">
+              {track.title.toUpperCase()}
+            </h2>
+            <div className="mt-6 flex justify-center">
+              <HeartButton
+                size="page"
+                hearted={hearted}
+                savedHearted={savedHearted}
+                pending={heartPending}
+                label={
+                  hearted
+                    ? `Unheart ${track.title}`
+                    : `Heart ${track.title}`
+                }
+                onToggle={onHeart}
+              />
+            </div>
+            {stats.data && (
+              <p className="mt-4 flex items-center justify-center gap-5">
+                <span className="flex items-center gap-2">
+                  <HeartIcon size={18} />
+                  <span className="font-pixel text-[18px]">
+                    {stats.data.hearts}
+                  </span>
+                </span>
+                <span className="font-data text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+                  {stats.data.plays}{" "}
+                  {stats.data.plays === 1 ? "play" : "plays"}
+                </span>
+              </p>
+            )}
+            <button
+              type="button"
+              onClick={onPlay}
+              className="nes-btn is-pink mt-6 min-h-[56px] w-full px-4 py-3 text-left"
+            >
+              <span className="font-pixel text-[20px]">▶ PLAY</span>
+              <span className="font-data block text-[11px] uppercase tracking-[0.12em]">
+                {track.title}
+              </span>
+            </button>
+            {guest && (
+              <p className="font-data mt-3 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+                Claim a name so your plays count.
+              </p>
+            )}
+            <div className="mt-6 flex items-center justify-between border-t border-[var(--border)] pt-4">
+              <button
+                type="button"
+                onClick={onBack}
+                className="font-data text-[11px] uppercase tracking-[0.12em] underline underline-offset-4"
+              >
+                ← The player
+              </button>
+              <button
+                type="button"
+                onClick={() => void copyLink()}
+                className="font-data text-[11px] uppercase tracking-[0.12em] underline underline-offset-4"
+              >
+                {copied ? "Link copied" : "Copy link"}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="mt-3 text-base leading-relaxed">
+              That song is not in the catalog.
+            </p>
+            <p className="mt-4">
+              <button
+                type="button"
+                onClick={onBack}
+                className="font-data text-[11px] uppercase tracking-[0.12em] underline underline-offset-4"
+              >
+                ← The player
+              </button>
+            </p>
+          </>
+        )}
+      </div>
     </section>
   );
 }

@@ -1127,6 +1127,44 @@ export const Actions = {
     },
   }),
 
+  getSongStats: defineAction({
+    description:
+      "Returns one song's public numbers for its song page: hearts received and plays logged. Public and anonymous — counts only, never who hearted or played it, and nothing else about the track. The pair (trackTitle, project) is the same key plays and hearts are stored under.",
+    request: z.object({
+      trackTitle: z.string().min(1).max(500),
+      project: z.string().min(1).max(500),
+    }),
+    response: z.object({
+      hearts: z.number(),
+      plays: z.number(),
+    }),
+    async handler(ctx, args) {
+      const db = ctx.db<typeof schema>();
+      const heartRows = await db
+        .select({ n: sql<number>`count(*)` })
+        .from(schema.favorites)
+        .where(
+          and(
+            eq(schema.favorites.trackTitle, args.trackTitle),
+            eq(schema.favorites.project, args.project),
+          ),
+        );
+      const playRows = await db
+        .select({ n: sql<number>`count(*)` })
+        .from(schema.plays)
+        .where(
+          and(
+            eq(schema.plays.trackTitle, args.trackTitle),
+            eq(schema.plays.project, args.project),
+          ),
+        );
+      return {
+        hearts: heartRows[0]?.n ?? 0,
+        plays: playRows[0]?.n ?? 0,
+      };
+    },
+  }),
+
   getMyRoad: defineAction({
     description:
       "Returns one signed-in listener's road: rank, gap to the listener above, milestone progress, streaks, today's cap usage, and recent plays.",
