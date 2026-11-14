@@ -16,6 +16,7 @@ import {
 import { ARTIST, CATALOG, type CatalogTrack } from "./catalog";
 import {
   isSongPath,
+  songClipPath,
   songIndexFromPath,
   songPath,
 } from "./songSlug";
@@ -2016,6 +2017,16 @@ export function App() {
     }
   }, [songIdx, playCatalogIndex]);
 
+  // The song page's clip window: when this very song is the one playing,
+  // the clip starts where the listener's ear is; from a cold page it
+  // starts at zero. Read at tap time, off the element itself, so the
+  // second is the one actually sounding when the button is pressed.
+  const clipStartForSongPage = useCallback(() => {
+    if (songIdx < 0 || songIdx !== nowIdx) return 0;
+    const audio = audioRef.current;
+    return audio ? Math.max(0, Math.floor(audio.currentTime || 0)) : 0;
+  }, [songIdx, nowIdx]);
+
   // The song page's heart: signed in, the toggle itself; a guest is
   // routed through the claim flow and returned to the page.
   const heartSongPage = useCallback(() => {
@@ -2440,6 +2451,8 @@ export function App() {
             }
             onHeart={heartSongPage}
             onPlay={playSongPage}
+            clipPath={songIdx >= 0 ? songClipPath(songIdx) : ""}
+            clipStartSec={clipStartForSongPage}
             onBack={() => setView("player")}
           />
         )}
@@ -2855,6 +2868,8 @@ function SongPage({
   heartPending,
   onHeart,
   onPlay,
+  clipPath,
+  clipStartSec,
   onBack,
 }: {
   track: CatalogTrack | undefined;
@@ -2864,6 +2879,8 @@ function SongPage({
   heartPending: boolean;
   onHeart: () => void;
   onPlay: () => void;
+  clipPath: string;
+  clipStartSec: () => number;
   onBack: () => void;
 }) {
   const stats = useQuery({
@@ -2884,6 +2901,63 @@ function SongPage({
     } catch {
       // Clipboard refused: the address bar still holds the link.
     }
+  };
+
+  // The clip: one function on the postcard, not the page's nature. The
+  // server renders on first ask and answers 202 while it works, so the
+  // control polls until the MP4 lands, then holds it as a blob — the
+  // same bytes feed both the share sheet and the download.
+  type ClipState =
+    | { phase: "idle" }
+    | { phase: "making" }
+    | { phase: "ready"; url: string; blobUrl: string }
+    | { phase: "error" };
+  const [clip, setClip] = useState<ClipState>({ phase: "idle" });
+  useEffect(() => {
+    // A different song's page is a different postcard: no stale clip.
+    setClip({ phase: "idle" });
+  }, [track?.title, track?.project]);
+
+  const clipFileName = `${clipPath.split("/").pop() ?? "song"}-clip.mp4`;
+  const makeClip = async () => {
+    if (!clipPath || clip.phase === "making") return;
+    const url = `${clipPath}?t=${Math.max(0, Math.floor(clipStartSec()))}`;
+    setClip({ phase: "making" });
+    try {
+      const deadline = Date.now() + 180_000;
+      for (;;) {
+        const res = await fetch(url);
+        if (res.status === 202) {
+          if (Date.now() > deadline) throw new Error("clip timed out");
+          await new Promise((r) => setTimeout(r, 2500));
+          continue;
+        }
+        if (!res.ok) throw new Error(`clip failed: ${res.status}`);
+        const blob = await res.blob();
+        setClip({ phase: "ready", url, blobUrl: URL.createObjectURL(blob) });
+        return;
+      }
+    } catch {
+      setClip({ phase: "error" });
+    }
+  };
+
+  const shareClip = async () => {
+    if (clip.phase !== "ready") return;
+    try {
+      const blob = await (await fetch(clip.url)).blob();
+      const file = new File([blob], clipFileName, { type: "video/mp4" });
+      if (navigator.canShare?.({ files: [file] })) {
+        await navigator.share({ files: [file] });
+        return;
+      }
+    } catch {
+      // Share refused or unsupported: fall through to the download.
+    }
+    const a = document.createElement("a");
+    a.href = clip.blobUrl;
+    a.download = clipFileName;
+    a.click();
   };
 
   return (
@@ -2936,6 +3010,44 @@ function SongPage({
                 {track.title}
               </span>
             </button>
+            {clip.phase === "ready" ? (
+              <div className="mt-3 flex items-center gap-5">
+                <button
+                  type="button"
+                  onClick={() => void shareClip()}
+                  className="nes-btn is-success px-4 py-2"
+                >
+                  <span className="font-pixel text-[14px]">SHARE CLIP</span>
+                </button>
+                <a
+                  href={clip.blobUrl}
+                  download={clipFileName}
+                  className="font-data text-[11px] uppercase tracking-[0.12em] underline underline-offset-4"
+                >
+                  Download
+                </a>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => void makeClip()}
+                disabled={clip.phase === "making"}
+                className="nes-btn mt-3 min-h-[48px] w-full px-4 py-2 text-left"
+              >
+                <span className="font-pixel text-[16px]">
+                  {clip.phase === "making"
+                    ? "MAKING YOUR CLIP…"
+                    : "CLIP · 30 SEC"}
+                </span>
+                <span className="font-data block text-[11px] uppercase tracking-[0.12em]">
+                  {clip.phase === "error"
+                    ? "That one did not render. Tap to try again."
+                    : clip.phase === "making"
+                      ? "The postcard, rendered as video. One moment."
+                      : "This song, as a video postcard."}
+                </span>
+              </button>
+            )}
             {guest && (
               <p className="font-data mt-3 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
                 Claim a name so your plays count.

@@ -47,6 +47,11 @@ export function songPath(idx: number): string {
   return `/s/${SLUG_BY_INDEX[idx] ?? ""}`;
 }
 
+/** The clip address for one catalog track: /clip/<slug> (the start second rides as ?t=). */
+export function songClipPath(idx: number): string {
+  return `/clip/${SLUG_BY_INDEX[idx] ?? ""}`;
+}
+
 /** The catalog index a slug names, or -1 when no track owns it. */
 export function songIndexFromSlug(slug: string): number {
   return INDEX_BY_SLUG.get(slug) ?? -1;

@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { Actions } from "../server/src/actions";
 import { handlers as privilegedHandlers } from "../server/src/privileged";
 import * as schema from "../server/src/schema";
+import { createClipHandler } from "./clip-route";
 import { createFingerprintHandler } from "./fingerprint-route";
 import { createSongPageHandler } from "./song-route";
 
@@ -267,6 +268,20 @@ async function handleAction(req: Request): Promise<Response> {
 
 const handleFingerprint = createFingerprintHandler(dirname(DB_PATH));
 const handleSongPage = createSongPageHandler(CLIENT_DIST);
+// A clip carries its song's public counts baked in at render time; the
+// same two counts getSongStats serves, read straight from the tables.
+const clipCountsFor = (trackTitle: string, project: string) => {
+  const row = sqlite
+    .query(
+      "SELECT (SELECT count(*) FROM favorites WHERE track_title = ? AND project = ?) AS hearts, (SELECT count(*) FROM plays WHERE track_title = ? AND project = ?) AS plays",
+    )
+    .get(trackTitle, project, trackTitle, project) as {
+    hearts: number;
+    plays: number;
+  } | null;
+  return { hearts: row?.hearts ?? 0, plays: row?.plays ?? 0 };
+};
+const handleClip = createClipHandler(dirname(DB_PATH), clipCountsFor);
 
 Bun.serve({
   port: PORT,
@@ -286,6 +301,10 @@ Bun.serve({
     }
     if (req.method === "GET" && url.pathname.startsWith("/s/")) {
       const res = handleSongPage(url);
+      if (res) return res;
+    }
+    if (req.method === "GET" && url.pathname.startsWith("/clip/")) {
+      const res = await handleClip(url);
       if (res) return res;
     }
     if (req.method === "GET" || req.method === "HEAD") {
