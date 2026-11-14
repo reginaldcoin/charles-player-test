@@ -88,11 +88,15 @@ export function createClipHandler(
   (sweepTimer as unknown as { unref?: () => void }).unref?.();
 
   const inflight = new Set<string>();
-  const negative = new Map<string, number>();
+  // A failed render is remembered with its reason: the 404 a listener
+  // gets while the failure is fresh says why, in the render's own
+  // words — on a box whose logs nobody can read from outside, a
+  // silent failure would be undiagnosable.
+  const negative = new Map<string, { at: number; error: string }>();
   let running = 0;
-  const queue: { key: string; job: () => Promise<boolean> }[] = [];
+  const queue: { key: string; job: () => Promise<string | null> }[] = [];
 
-  function kick(key: string, job: () => Promise<boolean>) {
+  function kick(key: string, job: () => Promise<string | null>) {
     if (inflight.has(key)) return;
     inflight.add(key);
     if (running >= MAX_CONCURRENT) {
@@ -102,19 +106,22 @@ export function createClipHandler(
     void run(key, job);
   }
 
-  async function run(key: string, job: () => Promise<boolean>) {
+  async function run(key: string, job: () => Promise<string | null>) {
     running++;
     const began = Date.now();
     console.log(`[clips] render start ${key}`);
     try {
-      const ok = await job();
+      const error = await job();
       console.log(
-        `[clips] render done ${key} ok=${ok} in ${Date.now() - began}ms`,
+        `[clips] render done ${key} ok=${error === null} in ${Date.now() - began}ms`,
       );
-      if (ok) negative.delete(key);
-      else negative.set(key, Date.now());
-    } catch {
-      negative.set(key, Date.now());
+      if (error === null) negative.delete(key);
+      else negative.set(key, { at: Date.now(), error });
+    } catch (e) {
+      negative.set(key, {
+        at: Date.now(),
+        error: e instanceof Error ? e.message : String(e),
+      });
     } finally {
       running--;
       inflight.delete(key);
@@ -151,14 +158,17 @@ export function createClipHandler(
         },
       });
     }
-    const failedAt = negative.get(key);
-    if (failedAt && Date.now() - failedAt < NEGATIVE_TTL_MS) {
-      return new Response("clip unavailable", { status: 404 });
+    const failed = negative.get(key);
+    if (failed && Date.now() - failed.at < NEGATIVE_TTL_MS) {
+      return Response.json(
+        { error: "clip unavailable", detail: failed.error },
+        { status: 404 },
+      );
     }
     kick(key, async () => {
       const counts = countsFor(track.title, track.project);
       const tmpOut = join(cacheDir, `${key}.rendering.mp4`);
-      const ok = await renderClip({
+      const r = await renderClip({
         src: track.src,
         startSec: start,
         durationSec: track.durationSec,
@@ -169,12 +179,12 @@ export function createClipHandler(
         plays: counts.plays,
         outPath: tmpOut,
       });
-      if (!ok) {
+      if (!r.ok) {
         rmSync(tmpOut, { force: true });
-        return false;
+        return r.error;
       }
       renameSync(tmpOut, file);
-      return true;
+      return null;
     });
     return new Response("rendering", {
       status: 202,

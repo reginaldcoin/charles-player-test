@@ -127,8 +127,13 @@ async function probeDurationSec(path: string): Promise<number | null> {
   }
 }
 
-/** Run one ffmpeg invocation to completion; false on any failure. */
-async function runFfmpeg(args: string[]): Promise<boolean> {
+/** One ffmpeg run's outcome; on failure, the tail of its stderr. */
+interface FfmpegResult {
+  ok: boolean;
+  error: string;
+}
+
+async function runFfmpeg(args: string[]): Promise<FfmpegResult> {
   try {
     const proc = Bun.spawn(["ffmpeg", "-v", "error", ...args], {
       stdout: "pipe",
@@ -136,21 +141,24 @@ async function runFfmpeg(args: string[]): Promise<boolean> {
     });
     // Drain stderr so a chatty failure can never stall the render,
     // and keep its tail: when a render dies on the small production
-    // machine, the log is the only witness.
+    // machine, its dying words are the only witness there is.
     const errText = new Response(
       proc.stderr as ReadableStream<Uint8Array>,
     ).text();
     const code = await proc.exited;
     if (code !== 0) {
-      const tail = (await errText)
-        .slice(-400)
-        .replace(/\s+/g, " ")
-        .trim();
-      if (tail) console.error(`[clips] ffmpeg failed (${code}): ${tail}`);
+      const tail =
+        (await errText).slice(-400).replace(/\s+/g, " ").trim() ||
+        `ffmpeg exited ${code} saying nothing`;
+      console.error(`[clips] ffmpeg failed (${code}): ${tail}`);
+      return { ok: false, error: tail };
     }
-    return code === 0;
-  } catch {
-    return false;
+    return { ok: true, error: "" };
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : String(e),
+    };
   }
 }
 
@@ -168,29 +176,40 @@ export interface ClipSpec {
   outPath: string;
 }
 
+/** A render's outcome; failures carry the reason in plain words. */
+export type ClipRenderResult =
+  | { ok: true }
+  | { ok: false; error: string };
+
 /**
- * Render one clip to spec.outPath. Bun-only (spawns ffmpeg); returns
- * false on any failure — the caller treats a clip as a courtesy and
- * caches the failure briefly rather than retrying in a hot loop.
+ * Render one clip to spec.outPath. Bun-only (spawns ffmpeg). The
+ * caller treats a clip as a courtesy and caches the failure briefly
+ * rather than retrying in a hot loop — and the failure carries its
+ * reason, because a clip that dies silently on the production box
+ * cannot be diagnosed from anywhere else.
  */
-export async function renderClip(spec: ClipSpec): Promise<boolean> {
+export async function renderClip(
+  spec: ClipSpec,
+): Promise<ClipRenderResult> {
   let dir: string | null = null;
   try {
     const res = await fetch(spec.src);
-    if (!res.ok) return false;
+    if (!res.ok) {
+      return { ok: false, error: `audio fetch answered HTTP ${res.status}` };
+    }
     const audio = new Uint8Array(await res.arrayBuffer());
     dir = mkdtempSync(join(tmpdir(), "clip-"));
     const input = join(dir, "input.mp3");
     writeFileSync(input, audio);
 
     const duration = spec.durationSec ?? (await probeDurationSec(input));
-    if (!duration) return false;
+    if (!duration) return { ok: false, error: "duration probe failed" };
     const len = Math.min(CLIP_SEC, duration);
     const start = Math.min(
       Math.max(0, Math.floor(spec.startSec)),
       Math.max(0, Math.floor(duration - CLIP_SEC)),
     );
-    if (len <= 0) return false;
+    if (len <= 0) return { ok: false, error: "empty clip window" };
 
     // drawtext reads its strings from files: no filter-grammar escaping
     // can mangle a title, whatever punctuation it carries.
@@ -307,7 +326,7 @@ export async function renderClip(spec: ClipSpec): Promise<boolean> {
     const pxPerSec = 108;
     const picW = Math.max(pxPerSec, Math.round(pxPerSec * len));
     const pic = join(dir, "waterfall.png");
-    const picOk = await runFfmpeg([
+    const picRes = await runFfmpeg([
       "-ss",
       String(start),
       "-t",
@@ -320,7 +339,12 @@ export async function renderClip(spec: ClipSpec): Promise<boolean> {
       "1",
       pic,
     ]);
-    if (!picOk || !existsSync(pic)) return false;
+    if (!picRes.ok) {
+      return { ok: false, error: `spectrogram pass: ${picRes.error}` };
+    }
+    if (!existsSync(pic)) {
+      return { ok: false, error: "spectrogram pass wrote no still" };
+    }
 
     // Pass 2: the poster's graphics as one still on black. The whole
     // drawbox/drawtext chain runs exactly once, on a single frame —
@@ -331,7 +355,7 @@ export async function renderClip(spec: ClipSpec): Promise<boolean> {
     // one); the movie pass keys the black away instead — every
     // graphic on the card is a bright color, so black is a safe key.
     const card = join(dir, "card.png");
-    const cardOk = await runFfmpeg([
+    const cardRes = await runFfmpeg([
       "-f",
       "lavfi",
       "-i",
@@ -342,7 +366,12 @@ export async function renderClip(spec: ClipSpec): Promise<boolean> {
       "1",
       card,
     ]);
-    if (!cardOk || !existsSync(card)) return false;
+    if (!cardRes.ok) {
+      return { ok: false, error: `card pass: ${cardRes.error}` };
+    }
+    if (!existsSync(card)) {
+      return { ok: false, error: "card pass wrote no still" };
+    }
 
     // Pass 3: slide the spectrogram still under the frame. It is
     // padded with ten seconds of black on the left, so at second t
@@ -360,7 +389,7 @@ export async function renderClip(spec: ClipSpec): Promise<boolean> {
       `[falls][cardk]overlay=0:0:format=rgb:repeatlast=1,format=yuv420p[vout]`,
     ].join(";");
 
-    const ok = await runFfmpeg([
+    const movieRes = await runFfmpeg([
       "-ss",
       String(start),
       "-t",
@@ -401,9 +430,18 @@ export async function renderClip(spec: ClipSpec): Promise<boolean> {
       String(len),
       spec.outPath,
     ]);
-    return ok && existsSync(spec.outPath);
-  } catch {
-    return false;
+    if (!movieRes.ok) {
+      return { ok: false, error: `movie pass: ${movieRes.error}` };
+    }
+    if (!existsSync(spec.outPath)) {
+      return { ok: false, error: "movie pass wrote no file" };
+    }
+    return { ok: true };
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : String(e),
+    };
   } finally {
     if (dir) rmSync(dir, { recursive: true, force: true });
   }
