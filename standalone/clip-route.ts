@@ -2,14 +2,24 @@
 // on first request and cached on the data volume beside the database
 // (see server/clip.ts for the render itself).
 //
-// Start times round DOWN to the nearest 5-second mark before anything
-// else — clamping, the cache key, the render — so listeners whose
-// playheads sit a second or two apart share one clip instead of
-// minting near-duplicates, and the cache stays small enough to keep.
-// The cache key is the slug plus that rounded start, so a link names
-// one exact window of one exact song. Cached clips older than 30 days
-// are swept at boot and daily thereafter; a hearted song's clip is
-// cheap to re-render, and the volume is not an archive.
+// ONE CLIP PER SONG. The first render request a song ever gets cooks
+// its one clip, from that request's window: the requested start rounds
+// DOWN to the nearest 5-second mark, then clamps against the song's
+// length. That window locks. Every later request for the song serves
+// the locked clip (or waits on its render), whatever ?t= it carries —
+// ?t= is advisory, spent only at the moment a song has no locked clip
+// and none in flight. The cache key is the slug alone, so a link names
+// one song, and the song names one clip.
+//
+// A locked clip resets after 28 days: clips older than that are swept
+// at boot and daily thereafter, and the next request re-cooks the song
+// fresh — a new first window, and the hearts and plays baked in are
+// the song's as they stand that day. A hearted song's clip is cheap to
+// re-render, and the volume is not an archive. Clips cooked before
+// this law, under window-named files, are adopted at boot: a song
+// with exactly one becomes that file, renamed; a song with several
+// keeps its smallest start; the rest stay sweepable under the same
+// 28-day rule.
 //
 // Renders run through a small FIFO queue, at most two at once: a
 // shared-CPU box rendering waterfalls for everyone at once would fall
@@ -40,12 +50,37 @@ import { songIndexFromSlug } from "../client/src/songSlug";
 import { CLIP_SEC, clipFileIsValid, renderClip } from "../server/clip";
 
 const CLIP_PATH_RE = /^\/clip\/([^/]+)\/?$/;
-const CLIP_FILE_RE = /^[a-z0-9][a-z0-9-]*--\d+\.mp4$/;
 const NEGATIVE_TTL_MS = 10 * 60 * 1000;
 const MAX_CONCURRENT = 2;
 const JOB_TIMEOUT_MS = 12 * 60 * 1000;
-const MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const MAX_AGE_MS = 28 * 24 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+// A legacy clip file wears its window in its name: <slug>--<start>.mp4.
+// Slugs never contain "--" beyond their one project/title separator and
+// never end in "--<digits>", so the last "--<digits>" is unambiguously
+// the window a pre-law clip was cooked from. Anything whose slug names
+// no catalog song is not a clip this route owns.
+function parseLegacyClipName(
+  name: string,
+): { slug: string; start: number } | null {
+  if (!name.endsWith(".mp4") || name.includes(".rendering-")) return null;
+  const m = /^(.*)--(\d+)$/.exec(name.slice(0, -4));
+  if (!m) return null;
+  const slug = m[1]!;
+  if (songIndexFromSlug(slug) < 0) return null;
+  return { slug, start: Number(m[2]) };
+}
+
+// True when a cache-dir name is a clip the sweep owns: a song's locked
+// clip (<slug>.mp4) or a legacy window clip not yet adopted.
+function isClipFile(name: string): boolean {
+  if (!name.endsWith(".mp4") || name.includes(".rendering-")) return false;
+  return (
+    songIndexFromSlug(name.slice(0, -4)) >= 0 ||
+    parseLegacyClipName(name) !== null
+  );
+}
 
 export interface ClipCounts {
   hearts: number;
@@ -59,6 +94,46 @@ export function createClipHandler(
   const cacheDir = join(dataDir, "clips");
   mkdirSync(cacheDir, { recursive: true });
 
+  // Adoption, once at boot: clips cooked before the one-clip law wear
+  // window names. A song holding legacy files and no locked clip
+  // adopts one — its smallest start — under the song's own name, so
+  // yesterday's cooking is not wasted. A rename keeps the file's age:
+  // the 28-day reset still comes for it on schedule. Songs that
+  // already own a locked clip keep it; their legacy files stay behind
+  // as sweepable extras.
+  function adoptLegacyClips() {
+    let adopted = 0;
+    try {
+      const bySong = new Map<string, { name: string; start: number }[]>();
+      for (const name of readdirSync(cacheDir)) {
+        const legacy = parseLegacyClipName(name);
+        if (!legacy) continue;
+        const arr = bySong.get(legacy.slug) ?? [];
+        arr.push({ name, start: legacy.start });
+        bySong.set(legacy.slug, arr);
+      }
+      for (const [slug, files] of bySong) {
+        const target = join(cacheDir, `${slug}.mp4`);
+        if (existsSync(target)) continue;
+        files.sort((a, b) => a.start - b.start);
+        try {
+          renameSync(join(cacheDir, files[0]!.name), target);
+          adopted++;
+        } catch {
+          // A file that vanished mid-adoption is not a failure.
+        }
+      }
+    } catch {
+      // No cache dir yet, nothing to adopt.
+    }
+    if (adopted > 0) {
+      console.log(
+        `[clips] adopted ${adopted} existing clip(s) as their songs' locked clips`,
+      );
+    }
+  }
+  adoptLegacyClips();
+
   // The age sweep: only this directory, only files wearing a clip's
   // name, plus render temps a dead process left behind (a temp older
   // than a day belongs to no living render — renders take minutes —
@@ -67,7 +142,7 @@ export function createClipHandler(
     let removed = 0;
     try {
       for (const name of readdirSync(cacheDir)) {
-        const isClip = CLIP_FILE_RE.test(name);
+        const isClip = isClipFile(name);
         const isTemp = name.includes(".rendering-") && name.endsWith(".mp4");
         if (!isClip && !isTemp) continue;
         const limit = isClip ? MAX_AGE_MS : DAY_MS;
@@ -85,7 +160,7 @@ export function createClipHandler(
       // No cache dir yet, nothing to sweep.
     }
     console.log(
-      `[clips] cache sweep: removed ${removed} clip(s) older than 30 days`,
+      `[clips] cache sweep: removed ${removed} clip(s) older than 28 days`,
     );
   }
   sweep();
@@ -159,15 +234,17 @@ export function createClipHandler(
     }
     const track = CATALOG[idx]!;
     const raw = Number(url.searchParams.get("t") ?? "0");
-    // Round down to the 5-second mark first; clamp second. The key,
-    // the render, and every later request for this window all inherit
-    // the rounded start.
+    // The key is the song alone. ?t= is read only because a song with
+    // no locked clip and none in flight cooks from this request's
+    // window: round down to the 5-second mark first, clamp second.
+    // Once the render below is kicked (or the locked file is served),
+    // the window is locked and ?t= has spent its say.
     let start = Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 0;
     start = Math.floor(start / 5) * 5;
     if (track.durationSec != null) {
       start = Math.min(start, Math.max(0, track.durationSec - CLIP_SEC));
     }
-    const key = `${slug}--${start}`;
+    const key = slug;
     const file = join(cacheDir, `${key}.mp4`);
     if (existsSync(file)) {
       // Once per boot, a cached clip must prove it is whole before
