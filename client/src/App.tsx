@@ -54,6 +54,19 @@ function fmtPts1(n: number): string {
   return (isFinite(n) ? n : 0).toFixed(1);
 }
 
+/** A reign's length in board words: the two largest units, nothing more. */
+function fmtReign(ms: number): string {
+  const mins = Math.floor(ms / 60000);
+  if (mins < 1) return "under a minute";
+  const days = Math.floor(mins / 1440);
+  const hours = Math.floor((mins % 1440) / 60);
+  const rem = mins % 60;
+  const unit = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  if (days > 0) return hours > 0 ? `${unit(days, "day")} ${unit(hours, "hour")}` : unit(days, "day");
+  if (hours > 0) return rem > 0 ? `${unit(hours, "hour")} ${rem} min` : unit(hours, "hour");
+  return `${mins} min`;
+}
+
 /** A listener's public !code, in classic tripcode green. */
 function TripCode({ code }: { code: string }) {
   return <span className="trip">!{code}</span>;
@@ -2469,6 +2482,18 @@ function Standings({
                   {top.minutes} minutes · {top.finishes} finishes · {top.depth}{" "}
                   deep
                 </p>
+                {top.reignSinceMs > 0 && (
+                  <p className="font-data mt-2 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+                    Reigning{" "}
+                    <span className="text-[var(--accent)]">
+                      {fmtReign(Date.now() - top.reignSinceMs)}
+                    </span>
+                    {top.reigns > 1 && <> · reign № {top.reigns}</>}
+                    {top.reigns > 1 && (
+                      <> · {fmtReign(top.champMs)} as champ all time</>
+                    )}
+                  </p>
+                )}
                 <div className="mt-2">
                   <DayBars bars={top.dayBars} />
                 </div>
@@ -2504,6 +2529,7 @@ function Standings({
                     </span>
                     <span className="font-data block text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
                       {l.minutes} min · {l.finishes} fin
+                      {l.champMs > 0 && <> · {fmtReign(l.champMs)} as champ</>}
                     </span>
                     <span className="mt-1 block">
                       <DayBars bars={l.dayBars} />

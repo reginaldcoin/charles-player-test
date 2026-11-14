@@ -34,6 +34,7 @@ import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk"
 import { Privileged } from "@space/privileged";
 import { and, asc, desc, eq, gte, inArray, lt, sql } from "drizzle-orm";
 import * as schema from "./schema";
+import { computeReigns } from "./reigns";
 
 type Db = ReturnType<Ctx["db"]>;
 
@@ -929,6 +930,9 @@ export const Actions = {
           depth: z.number(),
           dayBars: z.array(z.number()),
           lastActiveMs: z.number(),
+          champMs: z.number(),
+          reigns: z.number(),
+          reignSinceMs: z.number(),
         }),
       ),
       totals: z.object({
@@ -1016,6 +1020,28 @@ export const Actions = {
         totalFinishes += a.finishes;
       }
 
+      // REIGNS: replay the judged record to rebuild every reign at № 1.
+      const reignPlays = await db
+        .select({
+          listenerId: schema.plays.listenerId,
+          points: schema.plays.points,
+          finished: schema.plays.finished,
+          playedAt: schema.plays.playedAt,
+          id: schema.plays.id,
+        })
+        .from(schema.plays)
+        .orderBy(asc(schema.plays.playedAt), asc(schema.plays.id));
+      const reigns = computeReigns(
+        reignPlays.map((p) => ({
+          listenerId: p.listenerId,
+          points: p.points,
+          finished: p.finished,
+          playedAtMs: p.playedAt.getTime(),
+        })),
+        new Map(all.map((l) => [l.id, l.createdAt.getTime()])),
+        Date.now(),
+      );
+
       return {
         listeners: rows.map((r, i) => ({
           rank: i + 1,
@@ -1029,6 +1055,9 @@ export const Actions = {
           depth: r.depth,
           dayBars: r.dayBars,
           lastActiveMs: r.lastActiveMs,
+          champMs: reigns.get(r.id)?.champMs ?? 0,
+          reigns: reigns.get(r.id)?.reigns ?? 0,
+          reignSinceMs: reigns.get(r.id)?.reignSinceMs ?? 0,
         })),
         totals: {
           listeners: rows.length,
