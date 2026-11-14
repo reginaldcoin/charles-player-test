@@ -44,11 +44,19 @@ export function createSongPageHandler(clientDist: string) {
     if (!isSongPath(url.pathname)) return null;
     const html = loadShell();
     if (html === null) return null;
+    // The shell names its assets relatively (./assets/...) because it is
+    // built to be served from the root. Under /s/<slug> a browser resolves
+    // those against /s/ and 404s, leaving a dead page, so the served copy
+    // points at the root-absolute asset paths instead.
+    const shellHtml = html.replace(
+      /(src|href)="\.\/assets\//g,
+      '$1="/assets/',
+    );
     const slug = songSlugFromPath(url.pathname);
     const track = slug ? songTrackFromSlug(slug) : undefined;
     const headers = { "content-type": "text/html; charset=utf-8" };
     if (!track) {
-      return new Response(html, { status: 404, headers });
+      return new Response(shellHtml, { status: 404, headers });
     }
     const title = `${track.title} — Charles Hamilton`;
     const description = `${track.title}, from ${track.project}. On the Charles Hamilton Player.`;
@@ -63,7 +71,7 @@ export function createSongPageHandler(clientDist: string) {
       `<meta name="twitter:title" content="${escapeHtml(title)}" />`,
       `<meta name="twitter:description" content="${escapeHtml(description)}" />`,
     ].join("\n    ");
-    const page = html
+    const page = shellHtml
       .replace(
         /<title>[^<]*<\/title>/,
         `<title>${escapeHtml(`${title} · ${track.project}`)}</title>`,
