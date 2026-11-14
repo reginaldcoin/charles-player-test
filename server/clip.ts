@@ -441,8 +441,13 @@ export async function renderClip(
       "2",
       "-c:v",
       "libx264",
+      // Superfast, not a prettier preset: the encoder shares one
+      // small, throttled CPU with the player itself, and a first
+      // render at veryfast measured in many minutes. The falls are
+      // soft color and motion; the frames they lose to a faster
+      // preset are frames nobody can see.
       "-preset",
-      "veryfast",
+      "superfast",
       "-crf",
       "21",
       "-c:a",
