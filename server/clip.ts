@@ -134,9 +134,21 @@ async function runFfmpeg(args: string[]): Promise<boolean> {
       stdout: "pipe",
       stderr: "pipe",
     });
-    // Drain stderr so a chatty failure can never stall the render.
-    void new Response(proc.stderr as ReadableStream<Uint8Array>).text();
-    return (await proc.exited) === 0;
+    // Drain stderr so a chatty failure can never stall the render,
+    // and keep its tail: when a render dies on the small production
+    // machine, the log is the only witness.
+    const errText = new Response(
+      proc.stderr as ReadableStream<Uint8Array>,
+    ).text();
+    const code = await proc.exited;
+    if (code !== 0) {
+      const tail = (await errText)
+        .slice(-400)
+        .replace(/\s+/g, " ")
+        .trim();
+      if (tail) console.error(`[clips] ffmpeg failed (${code}): ${tail}`);
+    }
+    return code === 0;
   } catch {
     return false;
   }
@@ -206,9 +218,21 @@ export async function renderClip(spec: ClipSpec): Promise<boolean> {
     const FH = 700;
     const T = 8; // border thickness
     const S = 14; // corner step
+    // The frame's graphics ride the card (below); its backing — the
+    // panel fill, the tab chip, and the tab's word itself — the movie
+    // pass draws straight onto the falls. The word must sit on its
+    // chip, above the border it breaks: drawn on the card it would
+    // land white-on-white over the card's own border line.
+    const tabFile = textFile("tab.txt", "POSTCARD");
+    const CHIP_X = 126;
+    const CHIP_W = 216;
     const frame: string[] = [
-      `drawbox=x=${FX}:y=${FY}:w=${FW}:h=${FH}:color=black@0.60:t=fill`,
-      `drawbox=x=${FX + S}:y=${FY}:w=${FW - 2 * S}:h=${T}:color=${WHITE}:t=fill`,
+      // The top border comes in two pieces: it stops where the tab
+      // sits and resumes after it, the way the player's own section
+      // frames break for their titles. The falls pass shows the chip
+      // and the word through the gap.
+      `drawbox=x=${FX + S}:y=${FY}:w=${CHIP_X - (FX + S)}:h=${T}:color=${WHITE}:t=fill`,
+      `drawbox=x=${CHIP_X + CHIP_W}:y=${FY}:w=${FX + FW - S - (CHIP_X + CHIP_W)}:h=${T}:color=${WHITE}:t=fill`,
       `drawbox=x=${FX + S}:y=${FY + FH - T}:w=${FW - 2 * S}:h=${T}:color=${WHITE}:t=fill`,
       `drawbox=x=${FX}:y=${FY + S}:w=${T}:h=${FH - 2 * S}:color=${WHITE}:t=fill`,
       `drawbox=x=${FX + FW - T}:y=${FY + S}:w=${T}:h=${FH - 2 * S}:color=${WHITE}:t=fill`,
@@ -220,14 +244,6 @@ export async function renderClip(spec: ClipSpec): Promise<boolean> {
       ].map(
         ([x, y]) =>
           `drawbox=x=${x}:y=${y}:w=${T}:h=${T}:color=${WHITE}:t=fill`,
-      ),
-      `drawbox=x=126:y=${FY - 17}:w=216:h=34:color=black:t=fill`,
-      drawText(
-        textFile("tab.txt", "POSTCARD"),
-        20,
-        FY - 10,
-        WHITE,
-        "126+(216-text_w)/2",
       ),
     ];
 
@@ -306,16 +322,43 @@ export async function renderClip(spec: ClipSpec): Promise<boolean> {
     ]);
     if (!picOk || !existsSync(pic)) return false;
 
-    // Pass 2: slide the still under the frame. It is padded with ten
-    // seconds of black on the left, so at second t the window shows
-    // seconds t-10..t of the clip — the falls flow in from the right
-    // edge, which is where "now" lives. The palette is crushed to
-    // luminance first, so the pink ramp is exact whatever palette the
-    // spectrogram filter reached for.
+    // Pass 2: the poster's graphics as one still on black. The whole
+    // drawbox/drawtext chain runs exactly once, on a single frame —
+    // running it on every frame of the movie instead was measured at
+    // ~405 MB of peak memory, which the small production machine
+    // cannot spare; the still costs a few percent of that. The still
+    // carries no alpha (this ffmpeg's lavfi canvas will not hold
+    // one); the movie pass keys the black away instead — every
+    // graphic on the card is a bright color, so black is a safe key.
+    const card = join(dir, "card.png");
+    const cardOk = await runFfmpeg([
+      "-f",
+      "lavfi",
+      "-i",
+      `color=c=black:s=${SIZE}x${SIZE}`,
+      "-vf",
+      overlays.join(","),
+      "-frames:v",
+      "1",
+      card,
+    ]);
+    if (!cardOk || !existsSync(card)) return false;
+
+    // Pass 3: slide the spectrogram still under the frame. It is
+    // padded with ten seconds of black on the left, so at second t
+    // the window shows seconds t-10..t of the clip — the falls flow
+    // in from the right edge, which is where "now" lives. The palette
+    // is crushed to luminance first, so the pink ramp is exact
+    // whatever palette the spectrogram filter reached for. The card
+    // still is laid over the falls in a single overlay.
     const filter = [
-      `[1:v]pad=w=${picW + SIZE}:h=${SIZE}:x=${SIZE}:y=0:color=black,crop=w=${SIZE}:h=${SIZE}:x='${pxPerSec}*t':y=0,format=gray,format=rgb24,lutrgb=r='val':g='val*0.412':b='val*0.706'`,
-      `${overlays.join(",")},format=yuv420p[vout]`,
-    ].join(",");
+      // The falls get the poster's backing drawn on directly: the
+      // translucent panel the words sit on, the tab's black chip, and
+      // the tab's word on top of its chip.
+      `[1:v]pad=w=${picW + SIZE}:h=${SIZE}:x=${SIZE}:y=0:color=black,crop=w=${SIZE}:h=${SIZE}:x='${pxPerSec}*t':y=0,format=gray,format=rgb24,lutrgb=r='val':g='val*0.412':b='val*0.706',drawbox=x=${FX}:y=${FY}:w=${FW}:h=${FH}:color=black@0.60:t=fill,drawbox=x=${CHIP_X}:y=${FY - 17}:w=${CHIP_W}:h=34:color=black:t=fill,drawtext=fontfile=${FONT}:textfile=${tabFile}:expansion=none:fontsize=20:fontcolor=${WHITE}:x=${CHIP_X}+(${CHIP_W}-text_w)/2:y=${FY - 10}[falls]`,
+      `[2:v]colorkey=0x000000:0.08:0.05[cardk]`,
+      `[falls][cardk]overlay=0:0:format=rgb:repeatlast=1,format=yuv420p[vout]`,
+    ].join(";");
 
     const ok = await runFfmpeg([
       "-ss",
@@ -330,6 +373,12 @@ export async function renderClip(spec: ClipSpec): Promise<boolean> {
       "30",
       "-i",
       pic,
+      // The card enters as a single frame, not a looped stream: a
+      // second 30 fps input makes the overlay's framesync queue whole
+      // frames from whichever stream runs ahead (measured: hundreds
+      // of MB). repeatlast holds the one frame for the whole clip.
+      "-i",
+      card,
       "-filter_complex",
       filter,
       "-map",
