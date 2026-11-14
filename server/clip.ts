@@ -390,6 +390,17 @@ export async function renderClip(
     ].join(";");
 
     const movieRes = await runFfmpeg([
+      // Thread counts are pinned, always: left to itself ffmpeg
+      // sizes its pools from the core count it can see, and on the
+      // production host that count is the whole machine room's —
+      // the encoder's frame stores multiplied out until the kernel
+      // killed the pass outright (exit 137, no stderr, seconds in).
+      // Two threads is plenty for thirty seconds of video and keeps
+      // the pass's memory where it was measured: tens of MB.
+      "-filter_threads",
+      "2",
+      "-filter_complex_threads",
+      "2",
       "-ss",
       String(start),
       "-t",
@@ -414,6 +425,8 @@ export async function renderClip(
       "[vout]",
       "-map",
       "0:a",
+      "-threads",
+      "2",
       "-c:v",
       "libx264",
       "-preset",
