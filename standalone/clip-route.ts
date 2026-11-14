@@ -37,7 +37,7 @@ import { join } from "node:path";
 
 import { ARTIST, CATALOG } from "../client/src/catalog";
 import { songIndexFromSlug } from "../client/src/songSlug";
-import { CLIP_SEC, renderClip } from "../server/clip";
+import { CLIP_SEC, clipFileIsValid, renderClip } from "../server/clip";
 
 const CLIP_PATH_RE = /^\/clip\/([^/]+)\/?$/;
 const CLIP_FILE_RE = /^[a-z0-9][a-z0-9-]*--\d+\.mp4$/;
@@ -59,16 +59,20 @@ export function createClipHandler(
   mkdirSync(cacheDir, { recursive: true });
 
   // The age sweep: only this directory, only files wearing a clip's
-  // name — in-flight .rendering.mp4 temps never match the pattern, so
-  // a sweep can never eat a render in progress.
+  // name, plus render temps a dead process left behind (a temp older
+  // than a day belongs to no living render — renders take minutes —
+  // while a young temp may be one in flight and is never touched).
   function sweep() {
     let removed = 0;
     try {
       for (const name of readdirSync(cacheDir)) {
-        if (!CLIP_FILE_RE.test(name)) continue;
+        const isClip = CLIP_FILE_RE.test(name);
+        const isTemp = name.includes(".rendering-") && name.endsWith(".mp4");
+        if (!isClip && !isTemp) continue;
+        const limit = isClip ? MAX_AGE_MS : DAY_MS;
         const path = join(cacheDir, name);
         try {
-          if (Date.now() - statSync(path).mtimeMs > MAX_AGE_MS) {
+          if (Date.now() - statSync(path).mtimeMs > limit) {
             rmSync(path, { force: true });
             removed++;
           }
@@ -88,6 +92,7 @@ export function createClipHandler(
   (sweepTimer as unknown as { unref?: () => void }).unref?.();
 
   const inflight = new Set<string>();
+  const verified = new Set<string>();
   // A failed render is remembered with its reason: the 404 a listener
   // gets while the failure is fresh says why, in the render's own
   // words — on a box whose logs nobody can read from outside, a
@@ -151,12 +156,27 @@ export function createClipHandler(
     const key = `${slug}--${start}`;
     const file = join(cacheDir, `${key}.mp4`);
     if (existsSync(file)) {
-      return new Response(Bun.file(file), {
-        headers: {
-          "content-type": "video/mp4",
-          "cache-control": "public, max-age=31536000, immutable",
-        },
-      });
+      // Once per boot, a cached clip must prove it is whole before
+      // it is served: a file orphaned mid-write by a restart is all
+      // picture and no index, and without the check it would be
+      // served, immutable, forever. A file that fails is deleted
+      // and the request falls through to a fresh render.
+      if (!verified.has(key)) {
+        if (await clipFileIsValid(file)) {
+          verified.add(key);
+        } else {
+          console.log(`[clips] cached ${key} is not a whole file; re-rendering`);
+          rmSync(file, { force: true });
+        }
+      }
+      if (existsSync(file)) {
+        return new Response(Bun.file(file), {
+          headers: {
+            "content-type": "video/mp4",
+            "cache-control": "public, max-age=31536000, immutable",
+          },
+        });
+      }
     }
     const failed = negative.get(key);
     if (failed && Date.now() - failed.at < NEGATIVE_TTL_MS) {
@@ -167,7 +187,15 @@ export function createClipHandler(
     }
     kick(key, async () => {
       const counts = countsFor(track.title, track.project);
-      const tmpOut = join(cacheDir, `${key}.rendering.mp4`);
+      // Every attempt renders to its OWN temp file: if the process
+      // restarts mid-render, the orphaned encoder and its successor
+      // must never write the same path at the same time — two
+      // writers on one file is how a cache entry ends up all
+      // picture and no index.
+      const tmpOut = join(
+        cacheDir,
+        `${key}.rendering-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.mp4`,
+      );
       const r = await renderClip({
         src: track.src,
         startSec: start,
@@ -184,6 +212,7 @@ export function createClipHandler(
         return r.error;
       }
       renameSync(tmpOut, file);
+      verified.add(key);
       return null;
     });
     return new Response("rendering", {

@@ -162,6 +162,18 @@ async function runFfmpeg(args: string[]): Promise<FfmpegResult> {
   }
 }
 
+/**
+ * Whether a file on disk is a whole, readable clip (its moov atom
+ * intact, a real duration inside). A render interrupted around a
+ * process restart can leave a cached file that is all picture data
+ * and no index — the host checks a cached clip once per boot before
+ * serving it and re-renders rather than serve a broken file forever.
+ */
+export async function clipFileIsValid(path: string): Promise<boolean> {
+  const d = await probeDurationSec(path);
+  return d !== null && d > 0;
+}
+
 export interface ClipSpec {
   src: string;
   /** Requested window start, whole seconds; clamped against the real duration. */
