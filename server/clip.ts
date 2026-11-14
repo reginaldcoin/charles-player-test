@@ -38,6 +38,7 @@ const FONT = join(
 );
 
 export const CLIP_SEC = 30;
+const FFMPEG_PASS_TIMEOUT_MS = 5 * 60 * 1000;
 const SIZE = 1080;
 const PINK = "0xff69b4";
 const DIM = "0xbfbfbf";
@@ -139,6 +140,16 @@ async function runFfmpeg(args: string[]): Promise<FfmpegResult> {
       stdout: "pipe",
       stderr: "pipe",
     });
+    // A pass gets five minutes, no more. On a starved box a pass
+    // can crawl, and a crawl with no ceiling is a wedge: the job
+    // never settles, its queue slot never frees, and every later
+    // clip waits behind it forever. A killed pass fails loudly and
+    // the slot moves on; a clip nobody could wait for is no loss.
+    let timedOut = false;
+    const watchdog = setTimeout(() => {
+      timedOut = true;
+      proc.kill();
+    }, FFMPEG_PASS_TIMEOUT_MS);
     // Drain stderr so a chatty failure can never stall the render,
     // and keep its tail: when a render dies on the small production
     // machine, its dying words are the only witness there is.
@@ -146,6 +157,13 @@ async function runFfmpeg(args: string[]): Promise<FfmpegResult> {
       proc.stderr as ReadableStream<Uint8Array>,
     ).text();
     const code = await proc.exited;
+    clearTimeout(watchdog);
+    if (timedOut) {
+      return {
+        ok: false,
+        error: `ffmpeg pass timed out after ${FFMPEG_PASS_TIMEOUT_MS / 1000}s`,
+      };
+    }
     if (code !== 0) {
       const tail =
         (await errText).slice(-400).replace(/\s+/g, " ").trim() ||
@@ -205,7 +223,11 @@ export async function renderClip(
 ): Promise<ClipRenderResult> {
   let dir: string | null = null;
   try {
-    const res = await fetch(spec.src);
+    // The fetch gets a ceiling for the same reason the passes do:
+    // a stalled read must fail the render, never hold it open.
+    const res = await fetch(spec.src, {
+      signal: AbortSignal.timeout(60_000),
+    });
     if (!res.ok) {
       return { ok: false, error: `audio fetch answered HTTP ${res.status}` };
     }

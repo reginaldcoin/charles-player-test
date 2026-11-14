@@ -43,6 +43,7 @@ const CLIP_PATH_RE = /^\/clip\/([^/]+)\/?$/;
 const CLIP_FILE_RE = /^[a-z0-9][a-z0-9-]*--\d+\.mp4$/;
 const NEGATIVE_TTL_MS = 10 * 60 * 1000;
 const MAX_CONCURRENT = 2;
+const JOB_TIMEOUT_MS = 12 * 60 * 1000;
 const MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -116,7 +117,20 @@ export function createClipHandler(
     const began = Date.now();
     console.log(`[clips] render start ${key}`);
     try {
-      const error = await job();
+      // A job gets twelve minutes end to end, whatever its passes
+      // are doing: past that the slot belongs to the next song. The
+      // abandoned job is not cancelled — its passes carry their own
+      // watchdogs — and if it ever does land, its file still caches
+      // and serves; the timeout only frees the queue.
+      const error = await Promise.race([
+        job(),
+        new Promise<string>((resolve) =>
+          setTimeout(
+            () => resolve("render timed out after 12 minutes"),
+            JOB_TIMEOUT_MS,
+          ),
+        ),
+      ]);
       console.log(
         `[clips] render done ${key} ok=${error === null} in ${Date.now() - began}ms`,
       );
