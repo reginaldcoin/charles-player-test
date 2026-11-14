@@ -926,7 +926,6 @@ export const Actions = {
           bugHunter: z.boolean(),
           score: z.number(),
           minutes: z.number(),
-          finishes: z.number(),
           depth: z.number(),
           dayBars: z.array(z.number()),
           lastActiveMs: z.number(),
@@ -939,7 +938,6 @@ export const Actions = {
         listeners: z.number(),
         plays: z.number(),
         minutes: z.number(),
-        finishes: z.number(),
       }),
     }),
     async handler(ctx) {
@@ -1013,11 +1011,9 @@ export const Actions = {
 
       let totalPlays = 0;
       let totalMinutes = 0;
-      let totalFinishes = 0;
       for (const a of aggs) {
         totalPlays += a.plays;
         totalMinutes += Math.floor(a.creditedSec / 60);
-        totalFinishes += a.finishes;
       }
 
       // REIGNS: replay the judged record to rebuild every reign at № 1.
@@ -1051,7 +1047,6 @@ export const Actions = {
           bugHunter: r.bugHunter,
           score: r.score,
           minutes: r.minutes,
-          finishes: r.finishes,
           depth: r.depth,
           dayBars: r.dayBars,
           lastActiveMs: r.lastActiveMs,
@@ -1063,7 +1058,6 @@ export const Actions = {
           listeners: rows.length,
           plays: totalPlays,
           minutes: totalMinutes,
-          finishes: totalFinishes,
         },
       };
     },

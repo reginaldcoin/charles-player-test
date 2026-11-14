@@ -2479,7 +2479,7 @@ function Standings({
                   {fmtPts1(top.score)}
                 </p>
                 <p className="font-data mt-2 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
-                  {top.minutes} minutes · {top.finishes} finishes · {top.depth}{" "}
+                  {top.minutes} minutes · {top.depth}{" "}
                   deep
                 </p>
                 {top.reignSinceMs > 0 && (
@@ -2528,7 +2528,7 @@ function Standings({
                       <PresenceDot lastActiveMs={l.lastActiveMs} />
                     </span>
                     <span className="font-data block text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
-                      {l.minutes} min · {l.finishes} fin
+                      {l.minutes} min
                       {l.champMs > 0 && <> · {fmtReign(l.champMs)} as champ</>}
                     </span>
                     <span className="mt-1 block">
@@ -2545,7 +2545,7 @@ function Standings({
 
           <p className="font-data px-4 py-4 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
             {data.totals.listeners} listeners · {data.totals.plays} plays ·{" "}
-            {data.totals.minutes} minutes · {data.totals.finishes} finishes,
+            {data.totals.minutes} minutes,
             all time
           </p>
         </>
