@@ -1,12 +1,21 @@
 // A SONG'S CLIP — the postcard, in motion.
 //
 // Thirty seconds of one song as a shareable video: the song page's own
-// postcard (project, title, the heart at the center, its hearts and
-// plays) over a waterfall of the song's real sound. The waterfall is
+// postcard over a waterfall of the song's real sound. The waterfall is
 // the window's whole spectrogram drawn once as a still, then slid
 // under a frame-wide window at real-time speed — the last ten seconds
 // of sound on screen, "now" at the right edge — with the palette
 // crushed to gray and ramped back up through the player's hot pink.
+//
+// The postcard stands in the player's own box grammar, the crown
+// poster its reference: a bold framed section with a title tab
+// breaking its top border, the poster's name big inside (here the
+// song's title), a small line above it (the project), a stats line
+// under the centerpiece (hearts, plays), and one line beneath that
+// (the artist). The heart holds the center of the frame, as it does
+// on the page. The falls run around the frame and glow through its
+// dark panel; no word sits on naked waterfall.
+//
 // Rendered here on the server with ffmpeg, once per (song, start
 // second), and cached by the host (see standalone/clip-route.ts). A
 // clip is a snapshot: the counts it carries are the counts at render
@@ -36,9 +45,14 @@ const WHITE = "0xffffff";
 
 // Press Start 2P advances roughly one em per glyph, so a line's width
 // in pixels is close to its length × the font size. Fit against a safe
-// measure of the frame, not the full width.
-function fitFontSize(text: string, maxFs: number, minFs: number): number {
-  const fs = Math.floor(980 / Math.max(1, text.length));
+// measure of the space the line has, not the full width.
+function fitFontSize(
+  text: string,
+  maxFs: number,
+  minFs: number,
+  maxWidth = 980,
+): number {
+  const fs = Math.floor(maxWidth / Math.max(1, text.length));
   return Math.min(maxFs, Math.max(minFs, fs));
 }
 
@@ -178,47 +192,96 @@ export async function renderClip(spec: ClipSpec): Promise<boolean> {
       fontsize: number,
       y: number,
       color: string,
+      x = "(w-text_w)/2",
     ): string =>
-      `drawtext=fontfile=${FONT}:textfile=${file}:expansion=none:fontsize=${fontsize}:fontcolor=${color}:x=(w-text_w)/2:y=${y}`;
+      `drawtext=fontfile=${FONT}:textfile=${file}:expansion=none:fontsize=${fontsize}:fontcolor=${color}:x=${x}:y=${y}`;
 
+    // The poster frame: a dark panel the falls glow through, a bold
+    // white border whose corners turn in one pixel step (the NES.css
+    // notch the player's own boxes wear), and a POSTCARD tab breaking
+    // the top border, exactly where THE CROWN wears its name.
+    const FX = 90;
+    const FY = 190;
+    const FW = 900;
+    const FH = 700;
+    const T = 8; // border thickness
+    const S = 14; // corner step
+    const frame: string[] = [
+      `drawbox=x=${FX}:y=${FY}:w=${FW}:h=${FH}:color=black@0.60:t=fill`,
+      `drawbox=x=${FX + S}:y=${FY}:w=${FW - 2 * S}:h=${T}:color=${WHITE}:t=fill`,
+      `drawbox=x=${FX + S}:y=${FY + FH - T}:w=${FW - 2 * S}:h=${T}:color=${WHITE}:t=fill`,
+      `drawbox=x=${FX}:y=${FY + S}:w=${T}:h=${FH - 2 * S}:color=${WHITE}:t=fill`,
+      `drawbox=x=${FX + FW - T}:y=${FY + S}:w=${T}:h=${FH - 2 * S}:color=${WHITE}:t=fill`,
+      ...[
+        [FX + S - T, FY + S - T],
+        [FX + FW - S, FY + S - T],
+        [FX + S - T, FY + FH - S],
+        [FX + FW - S, FY + FH - S],
+      ].map(
+        ([x, y]) =>
+          `drawbox=x=${x}:y=${y}:w=${T}:h=${T}:color=${WHITE}:t=fill`,
+      ),
+      `drawbox=x=126:y=${FY - 17}:w=216:h=34:color=black:t=fill`,
+      drawText(
+        textFile("tab.txt", "POSTCARD"),
+        20,
+        FY - 10,
+        WHITE,
+        "126+(216-text_w)/2",
+      ),
+    ];
+
+    const INNER_W = 800;
     const projectText = spec.project.toUpperCase();
-    const projectFs = fitFontSize(projectText, 26, 14);
+    const projectFs = fitFontSize(projectText, 26, 14, INNER_W);
 
     const titleUpper = spec.title.toUpperCase();
     let titleLines = [titleUpper];
-    let titleFs = fitFontSize(titleUpper, 54, 22);
-    if (titleFs <= 26 && titleUpper.length > 20) {
+    let titleFs = fitFontSize(titleUpper, 56, 22, INNER_W);
+    if (titleFs <= 28 && titleUpper.length > 20) {
       titleLines = wrapTitle(titleUpper);
       const longest = Math.max(...titleLines.map((l) => l.length));
-      titleFs = fitFontSize("x".repeat(longest), 54, 22);
+      titleFs = fitFontSize("x".repeat(longest), 56, 22, INNER_W);
     }
+    const titleY = 286;
+    // The heart hangs under the title block, whatever its height, and
+    // the stats and artist lines hang under the heart: one stack,
+    // crown-poster order, top to bottom.
+    const heartBlock = 44;
+    const heartY =
+      titleY +
+      (titleLines.length - 1) * Math.round(titleFs * 1.45) +
+      titleFs +
+      44;
+    const statsY = heartY + 6 * heartBlock + 42;
+    const artistY = statsY + 54;
 
-    const heartsText = `${spec.hearts} ${spec.hearts === 1 ? "HEART" : "HEARTS"}`;
-    const playsText = `${spec.plays} ${spec.plays === 1 ? "PLAY" : "PLAYS"}`;
+    const statsText = `${spec.hearts} ${spec.hearts === 1 ? "HEART" : "HEARTS"} · ${spec.plays} ${spec.plays === 1 ? "PLAY" : "PLAYS"}`;
 
     const overlays: string[] = [
-      // Dark bands the type sits on; the falls run the full frame.
-      `drawbox=x=0:y=0:w=${SIZE}:h=248:color=black@0.55:t=fill`,
-      `drawbox=x=205:y=318:w=670:h=430:color=black@0.50:t=fill`,
-      `drawbox=x=0:y=872:w=${SIZE}:h=208:color=black@0.55:t=fill`,
-      drawText(textFile("project.txt", projectText), projectFs, 52, DIM),
+      ...frame,
+      drawText(textFile("project.txt", projectText), projectFs, 242, DIM),
       ...titleLines.map((line, i) =>
         drawText(
           textFile(`title${i}.txt`, line),
           titleFs,
-          108 + Math.round(i * titleFs * 1.45),
+          titleY + Math.round(i * titleFs * 1.45),
           WHITE,
         ),
       ),
-      // The heart at the center of the card: 7×6 cells of 36px.
-      ...heartBoxes(414, 356, 36),
-      drawText(textFile("hearts.txt", heartsText), 30, 600, PINK),
-      drawText(textFile("plays.txt", playsText), 22, 656, DIM),
+      // The heart at the center of the poster: 7×6 cells of 44px.
+      ...heartBoxes((SIZE - 7 * heartBlock) / 2, heartY, heartBlock),
+      drawText(
+        textFile("stats.txt", statsText),
+        fitFontSize(statsText, 26, 15, INNER_W),
+        statsY,
+        WHITE,
+      ),
       drawText(
         textFile("artist.txt", spec.artist.toUpperCase()),
-        30,
-        922,
-        WHITE,
+        24,
+        artistY,
+        PINK,
       ),
     ];
 
