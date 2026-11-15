@@ -30,6 +30,7 @@
 // listener's totals and earns minute points on its eligible seconds,
 // repeat listens included.
 
+import { createHash, timingSafeEqual } from "node:crypto";
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
 import { Privileged } from "@space/privileged";
 import { and, asc, desc, eq, gt, gte, inArray, lt, sql } from "drizzle-orm";
@@ -2191,6 +2192,103 @@ export const Actions = {
       }
       ctx.invalidateQueries();
       return { ok: true, error: null };
+    },
+  }),
+
+  ingestSiteUpdate: defineAction({
+    description:
+      "Machine-only: the deploy pipeline posts a ship's own headline into the HISTORY feed. Authorized by the SITE_UPDATE_INGEST_KEY env secret, never by a listener session. It can only INSERT one site_updates row, deduplicated on sourceRef (the source commit's SHA) — a repeat ingest of the same commit is a no-op. It cannot delete or touch anything else.",
+    request: z.object({
+      key: z.string().min(1),
+      text: z.string().min(1).max(280),
+      atMs: z.number().int().positive(),
+      sourceRef: z.string().min(1).max(128),
+    }),
+    response: z.object({
+      ok: z.boolean(),
+      error: z.string().nullable(),
+      id: z.number().nullable(),
+      deduped: z.boolean(),
+    }),
+    async handler(ctx, args) {
+      // Constant-time key check: compare SHA-256 digests so neither
+      // the key's length nor a matching prefix leaks through timing.
+      const expected = process.env.SITE_UPDATE_INGEST_KEY ?? "";
+      const digest = (s: string) =>
+        createHash("sha256").update(s, "utf8").digest();
+      if (
+        !expected ||
+        !timingSafeEqual(digest(args.key), digest(expected))
+      ) {
+        return {
+          ok: false,
+          error: "That key doesn't open this door.",
+          id: null,
+          deduped: false,
+        };
+      }
+      const text = args.text.trim();
+      if (!text) {
+        return {
+          ok: false,
+          error: "Say something first.",
+          id: null,
+          deduped: false,
+        };
+      }
+      const db = ctx.db<typeof schema>();
+      const existing = await db
+        .select({ id: schema.siteUpdates.id })
+        .from(schema.siteUpdates)
+        .where(eq(schema.siteUpdates.sourceRef, args.sourceRef))
+        .limit(1);
+      if (existing.length > 0) {
+        return {
+          ok: true,
+          error: null,
+          id: existing[0]?.id ?? null,
+          deduped: true,
+        };
+      }
+      try {
+        const inserted = await db
+          .insert(schema.siteUpdates)
+          .values({
+            text,
+            createdAt: new Date(args.atMs),
+            sourceRef: args.sourceRef,
+          })
+          .returning({ id: schema.siteUpdates.id });
+        ctx.invalidateQueries();
+        return {
+          ok: true,
+          error: null,
+          id: inserted[0]?.id ?? null,
+          deduped: false,
+        };
+      } catch {
+        // The unique index on source_ref fired: a twin ingest landed
+        // first. That is the dedupe working, not a failure.
+        const row = await db
+          .select({ id: schema.siteUpdates.id })
+          .from(schema.siteUpdates)
+          .where(eq(schema.siteUpdates.sourceRef, args.sourceRef))
+          .limit(1);
+        if (row.length > 0) {
+          return {
+            ok: true,
+            error: null,
+            id: row[0]?.id ?? null,
+            deduped: true,
+          };
+        }
+        return {
+          ok: false,
+          error: "The update didn't land. Try again.",
+          id: null,
+          deduped: false,
+        };
+      }
     },
   }),
 } satisfies ActionsModule;

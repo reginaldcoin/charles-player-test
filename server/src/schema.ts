@@ -134,6 +134,11 @@ export const siteUpdates = sqliteTable("site_updates", {
   createdAt: integer("created_at", { mode: "timestamp_ms" })
     .notNull()
     .$defaultFn(() => new Date()),
+  // Dedupe key for machine-ingested updates (GitHub deploys posting
+  // their own headline): the source commit's SHA. NULL for updates an
+  // operator posts by hand from the back room — SQLite unique indexes
+  // treat NULLs as distinct, so hand-posted rows never collide.
+  sourceRef: text("source_ref"),
 });
 
 // Hearts: a listener's favorited tracks, keyed exactly the way plays are
