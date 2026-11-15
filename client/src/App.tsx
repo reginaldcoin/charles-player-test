@@ -2182,8 +2182,14 @@ export function App() {
             {/* Session/score overlay: bounded on BOTH sides and clipped
                 to the panel, so at phone width the text wraps and the
                 score numerals shrink inside the box instead of crowding
-                or clipping at the panel's right edge. */}
-            <div className="chrome pointer-events-none absolute left-3 right-3 top-3 overflow-hidden border-2 border-[var(--border)] bg-[var(--bg)]/70 px-3 py-2 text-right">
+                or clipping at the panel's right edge. The z-10 keeps the
+                framed panel ABOVE the not-started PLAY veil below: the
+                veil's 85% black otherwise paints over the panel (it is
+                the later sibling) and crushes its border and text to
+                unreadable in the idle states — the guest-idle miss of
+                2026-11-14. pointer-events-none is already set, so taps
+                still land on the veil's button. */}
+            <div className="chrome pointer-events-none absolute left-3 right-3 top-3 z-10 overflow-hidden border-2 border-[var(--border)] bg-[var(--bg)]/70 px-3 py-2 text-right">
               <p className="font-data text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
                 Session
               </p>
@@ -2223,12 +2229,14 @@ export function App() {
             )}
           </div>
 
-          {/* Now playing — framed like the site's other sections;
-              inside the frame the title is still the one break: it
-              runs poster-wide */}
+          {/* Now playing — framed like the site's other sections, its
+              label riding the top border as a tab like every other
+              section's (the same words it always carried, project and
+              all); inside the frame the title is still the one break:
+              it runs poster-wide */}
           <div className="px-4 pt-4">
-            <div className="nes-container px-4 pb-4 pt-4">
-            <p className="font-data text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+            <div className="nes-container with-title px-4 pb-4 pt-4">
+            <p className="title font-pixel text-[11px] uppercase">
               {nowTrack ? `Now playing · ${nowTrack.project}` : "Now playing"}
             </p>
             <div className="mt-3 flex items-start justify-between gap-3">
@@ -2634,11 +2642,17 @@ function Standings({
             <div className="px-4 pt-4">
               <div className="nes-container with-title relative px-5 pb-5 pt-4">
                 <p className="title font-pixel text-[11px]">THE CROWN</p>
+                {/* The giant rank numeral, inset from the frame on
+                    every side: a negative top offset gets the glyph's
+                    top clipped flat by this wrapper, and at quarter
+                    strength the pink read as dark mauve against the
+                    panel (both fixed 2026-11-14). Half strength keeps
+                    it a watermark under the full-pink score below. */}
                 <span
                   aria-hidden
                   className="pointer-events-none absolute inset-0 overflow-hidden"
                 >
-                  <span className="font-pixel absolute -top-4 right-2 text-[121px] leading-none text-[var(--accent)] opacity-25">
+                  <span className="font-pixel absolute right-2 top-2 text-[121px] leading-none text-[var(--accent)] opacity-50">
                     1
                   </span>
                 </span>
