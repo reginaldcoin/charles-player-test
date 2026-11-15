@@ -117,24 +117,37 @@ function BugGlyph() {
   );
 }
 
-/** Builder flair: a little pixel hammer, granted by the operators to
-    listeners whose suggested site update actually shipped. */
+/** Builder flair: a little pixel claw hammer, granted by the operators
+    to listeners whose suggested site update actually shipped. Silver
+    head — bright striking face on the right, darker steel claw hooking
+    down on the left — on a woody handle angled down like 🔨. */
 function HammerGlyph() {
-  const amber = "#fbbf24";
-  const face = "#d97706";
-  const wood = "#b45309";
-  const grip = "#92400e";
+  const face = "#e5e7eb";
+  const silver = "#c0c0c0";
+  const steel = "#9ca3af";
+  const wood = "#b08968";
+  const darkWood = "#8a6844";
   return (
     <span title="Builder" className="ml-1 inline-flex align-[-2px]">
       <svg viewBox="0 0 10 10" shapeRendering="crispEdges" aria-hidden className="h-[13px] w-[13px]">
-        <rect x="2" y="2" width="1" height="1" fill={amber} />
-        <rect x="3" y="1" width="6" height="3" fill={amber} />
+        <rect x="1" y="0" width="2" height="1" fill={steel} />
+        <rect x="0" y="1" width="2" height="1" fill={steel} />
+        <rect x="0" y="2" width="1" height="2" fill={steel} />
+        <rect x="0" y="4" width="2" height="1" fill={steel} />
+        <rect x="4" y="3" width="2" height="1" fill={steel} />
+        <rect x="3" y="0" width="5" height="1" fill={silver} />
+        <rect x="2" y="1" width="6" height="1" fill={silver} />
+        <rect x="2" y="2" width="6" height="1" fill={silver} />
+        <rect x="7" y="3" width="1" height="1" fill={silver} />
         <rect x="8" y="1" width="1" height="3" fill={face} />
-        <rect x="5" y="4" width="2" height="1" fill={wood} />
-        <rect x="4" y="5" width="2" height="1" fill={wood} />
-        <rect x="3" y="6" width="2" height="1" fill={wood} />
-        <rect x="2" y="7" width="2" height="1" fill={wood} />
-        <rect x="1" y="8" width="2" height="1" fill={grip} />
+        <rect x="4" y="4" width="1" height="1" fill={wood} />
+        <rect x="3" y="5" width="1" height="2" fill={wood} />
+        <rect x="2" y="7" width="1" height="2" fill={wood} />
+        <rect x="1" y="9" width="1" height="1" fill={wood} />
+        <rect x="5" y="4" width="1" height="1" fill={darkWood} />
+        <rect x="4" y="5" width="1" height="2" fill={darkWood} />
+        <rect x="3" y="7" width="1" height="2" fill={darkWood} />
+        <rect x="2" y="9" width="1" height="1" fill={darkWood} />
       </svg>
     </span>
   );
