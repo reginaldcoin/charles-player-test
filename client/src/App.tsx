@@ -17,6 +17,13 @@ import {
 } from "./heartToggle";
 import { ARTIST, CATALOG, type CatalogTrack } from "./catalog";
 import {
+  decideAdvance,
+  peekSetNext,
+  startSet,
+  SET_FULL_RANK,
+  type SetState,
+} from "./setQueue";
+import {
   isSongPath,
   songIndexFromPath,
   songPath,
@@ -706,6 +713,32 @@ export function App() {
   const [lastAward, setLastAward] = useState<string | null>(null);
   const [hasPrev, setHasPrev] = useState(false);
 
+  // Sets (play by project): the running set's state lives in a ref
+  // the end-of-track machinery reads; activeSet is its UI mirror.
+  // The loop is one switch whose scope follows the deck's context —
+  // a song loop in the shuffle, a project loop inside a set.
+  const setRef = useRef<SetState | null>(null);
+  const [activeSet, setActiveSet] = useState<{
+    project: string;
+    pos: number;
+    total: number;
+  } | null>(null);
+  const loopRef = useRef(false);
+  const [loopOn, setLoopOn] = useState(false);
+
+  const syncSetUi = useCallback(() => {
+    const s = setRef.current;
+    setActiveSet(
+      s ? { project: s.project, pos: s.pos, total: s.tracks.length } : null,
+    );
+  }, []);
+
+  const endSet = useCallback(() => {
+    if (!setRef.current) return;
+    setRef.current = null;
+    setActiveSet(null);
+  }, []);
+
   const nowTrack = nowIdx >= 0 ? CATALOG[nowIdx] : undefined;
 
   // Hearts, read side: the road query doubles as the favorites source
@@ -1023,10 +1056,18 @@ export function App() {
     return bagRef.current.pop() ?? 0;
   }, []);
 
-  // Peek at the track pickNext would serve (refilling the bag the
-  // same way) without consuming it. Exists only to aim the preload;
-  // the real advance still pops for itself.
+  // Peek at the track the deck would serve next (refilling the bag
+  // the same way) without consuming it. Exists only to aim the
+  // preload; the real advance still decides for itself. Inside a
+  // set, the aim follows the set's order — and at the set's end,
+  // the armed loop's re-run or the bag's pick, whichever owns the
+  // next seam.
   const peekNext = useCallback((): number => {
+    const s = setRef.current;
+    if (s) {
+      const inSet = peekSetNext(s, loopRef.current);
+      if (inSet !== null) return inSet;
+    }
     if (CATALOG.length === 1) return 0;
     if (bagRef.current.length === 0) {
       const all = CATALOG.map((_, i) => i).filter(
@@ -1280,9 +1321,22 @@ export function App() {
       void reportPlay(natural);
       failStreakRef.current = 0;
       errBurstRef.current = { count: 0, lastAt: 0 };
-      loadTrack(pickNext(), true);
+      // The set machine decides what a track end means here: walk
+      // the set, re-run it under an armed project loop, repeat the
+      // song under an armed song loop, or hand the deck back to the
+      // shuffle. Whatever it answers loads through the same track
+      // machinery as any other handoff.
+      const action = decideAdvance(
+        currentRef.current,
+        setRef.current,
+        natural,
+        loopRef.current,
+      );
+      setRef.current = action.set;
+      syncSetUi();
+      loadTrack(action.kind === "shuffle" ? pickNext() : action.index, true);
     },
-    [reportPlay, pickNext, loadTrack],
+    [reportPlay, pickNext, loadTrack, syncSetUi],
   );
 
   const handleTrackError = useCallback(() => {
@@ -1311,10 +1365,20 @@ export function App() {
     window.setTimeout(() => {
       // Same rule as the natural handoff: settle in the background,
       // load the next track now — never gate playback on the POST.
+      // Inside a set, an error walks the set's order like a skip
+      // (never a loop); the set ends where its order runs out.
       void reportPlay(false);
-      loadTrack(pickNext(), true);
+      const action = decideAdvance(
+        currentRef.current,
+        setRef.current,
+        false,
+        loopRef.current,
+      );
+      setRef.current = action.set;
+      syncSetUi();
+      loadTrack(action.kind === "shuffle" ? pickNext() : action.index, true);
     }, 1200);
-  }, [reportPlay, pickNext, loadTrack]);
+  }, [reportPlay, pickNext, loadTrack, syncSetUi]);
 
   // THE STALL EVALUATION (extracted 2026-11-13, the wake-side fix).
   // This is the ladder block the 250ms interval used to carry inline,
@@ -1562,11 +1626,13 @@ export function App() {
     const prev = historyRef.current.pop();
     setHasPrev(historyRef.current.length > 0);
     if (prev === undefined) return;
+    // Stepping back leaves the set behind: the visit is over.
+    endSet();
     await reportPlay(false);
     failStreakRef.current = 0;
     navBackRef.current = true;
     loadTrack(prev, true);
-  }, [reportPlay, loadTrack]);
+  }, [reportPlay, loadTrack, endSet]);
 
   // Play one catalog track directly (a Recent Plays row): same engine
   // start as the first PLAY tap, same settle-then-load path as NEXT,
@@ -1579,6 +1645,10 @@ export function App() {
         await restartTrack();
         return;
       }
+      // A hand-picked song ends any running set: the visit is over
+      // and the shuffle owns what follows. (playSet arms its set
+      // after this call, so a set's own first track survives it.)
+      endSet();
       ensureAudio();
       setStarted(true);
       void requestWakeLock();
@@ -1589,8 +1659,49 @@ export function App() {
       failStreakRef.current = 0;
       loadTrack(idx, true);
     },
-    [ensureAudio, loadTrack, reportPlay, requestWakeLock, restartTrack],
+    [
+      ensureAudio,
+      loadTrack,
+      reportPlay,
+      requestWakeLock,
+      restartTrack,
+      endSet,
+    ],
   );
+
+  // Play a whole project — the set. The queue is built by the gate
+  // at this press: the listener's current board rank (the road
+  // query's, refreshed on its own beat) decides whether the set
+  // runs whole or gives its first song only. The first track starts
+  // through the ordinary pick path; the set arms behind it, and the
+  // end-of-track machine walks it from there. Starting a set while
+  // one runs replaces it.
+  const playSet = useCallback(
+    (project: string) => {
+      const indices: number[] = [];
+      CATALOG.forEach((t, i) => {
+        if (t.project === project) indices.push(i);
+      });
+      const rank = roadLite.data?.rank ?? null;
+      const set = startSet(project, indices, rank);
+      if (!set) return;
+      const first = set.tracks[0];
+      if (first === undefined) return;
+      void playCatalogIndex(first);
+      setRef.current = set;
+      syncSetUi();
+    },
+    [playCatalogIndex, roadLite.data?.rank, syncSetUi],
+  );
+
+  // The loop is one switch; its scope is the deck's context, read
+  // at the seam by the set machine: song in the shuffle, set in a
+  // set. The button shows which scope it holds right now.
+  const toggleLoop = useCallback(() => {
+    const next = !loopRef.current;
+    loopRef.current = next;
+    setLoopOn(next);
+  }, []);
 
   // Recent Plays entries resolve against the catalog by title +
   // project (the exact pair they were logged from); title alone is
@@ -2541,6 +2652,47 @@ export function App() {
             </button>
           </div>
 
+          {/* The loop — one switch, two scopes. In the shuffle it
+              holds the song; inside a set it holds the whole set.
+              The label names the scope it holds right now. */}
+          <div className="chrome px-4 pb-4">
+            <button
+              type="button"
+              aria-label={
+                loopOn
+                  ? activeSet
+                    ? "Loop the set: on"
+                    : "Loop the song: on"
+                  : "Loop: off"
+              }
+              aria-pressed={loopOn}
+              onClick={toggleLoop}
+              disabled={!started}
+              className={`nes-btn min-h-[48px] w-full px-3 py-2 text-left disabled:opacity-40 ${
+                loopOn ? "is-primary" : ""
+              }`}
+            >
+              <span className="font-pixel text-[16px]">↻</span>
+              <span className="font-data ml-2 text-[11px] uppercase tracking-[0.12em]">
+                {loopOn
+                  ? activeSet
+                    ? "Loop · Set"
+                    : "Loop · Song"
+                  : "Loop · Off"}
+              </span>
+            </button>
+            {activeSet && (
+              <p className="font-data mt-3 text-[11px] uppercase leading-relaxed tracking-[0.12em] text-[var(--dim)]">
+                In a set —{" "}
+                <span className="text-[var(--text)]">{activeSet.project}</span>{" "}
+                · song {activeSet.pos + 1} of {activeSet.total}
+                {activeSet.total === 1
+                  ? " · then back to the shuffle"
+                  : " · the shuffle takes it back at the end"}
+              </p>
+            )}
+          </div>
+
           <div className="chrome px-4 py-4">
             {identity ? (
               <p className="font-data text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
@@ -2589,6 +2741,8 @@ export function App() {
             sessionStale={sessionStale}
             onClaim={() => setView("road")}
             onPlayTrack={playRecent}
+            onPlaySet={playSet}
+            myRank={roadLite.data?.rank ?? null}
           />
         </section>
 
@@ -3362,17 +3516,22 @@ function MostLoved({
 // ---------------------------------------------------------------------------
 
 const SEARCH_RESULT_CAP = 60;
+const SEARCH_SET_CAP = 8;
 
 function CatalogSearch({
   identity,
   sessionStale,
   onClaim,
   onPlayTrack,
+  onPlaySet,
+  myRank,
 }: {
   identity: Identity | null;
   sessionStale: boolean;
   onClaim: () => void;
   onPlayTrack: (trackTitle: string, project: string) => void;
+  onPlaySet: (project: string) => void;
+  myRank: number | null;
 }) {
   const signedIn = !!identity && !sessionStale;
   const [query, setQuery] = useState("");
@@ -3400,8 +3559,33 @@ function CatalogSearch({
     [],
   );
 
+  // Sets: the projects the query names. A project matches when
+  // every term lands in its name — the same discipline the tracks
+  // use. First-appearance catalog order, counts from the catalog.
+  const sets = useMemo(() => {
+    if (!searching) return [] as { project: string; count: number }[];
+    const counts = new Map<string, number>();
+    for (const t of CATALOG) counts.set(t.project, (counts.get(t.project) ?? 0) + 1);
+    const found: { project: string; count: number }[] = [];
+    const seen = new Set<string>();
+    for (const t of CATALOG) {
+      if (seen.has(t.project)) continue;
+      seen.add(t.project);
+      const name = t.project.toLowerCase();
+      if (terms.every((term) => name.includes(term))) {
+        found.push({ project: t.project, count: counts.get(t.project) ?? 0 });
+      }
+    }
+    return found.slice(0, SEARCH_SET_CAP);
+  }, [query]);
+
   const play = (t: CatalogTrack) => {
     onPlayTrack(t.title, t.project);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const playProject = (project: string) => {
+    onPlaySet(project);
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
@@ -3473,6 +3657,47 @@ function CatalogSearch({
               {total > SEARCH_RESULT_CAP &&
                 ` — first ${SEARCH_RESULT_CAP} shown, keep typing to narrow it`}
             </p>
+            {sets.length > 0 && (
+              <>
+                <p className="font-data px-4 pt-4 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+                  Sets — play a whole project
+                </p>
+                <ol className="mt-2">
+                  {sets.map((s) => (
+                    <li
+                      key={s.project}
+                      className="border-b border-[var(--border)] px-4 py-3"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => playProject(s.project)}
+                        className="flex w-full items-center gap-4 text-left"
+                        aria-label={`Play the set ${s.project}`}
+                      >
+                        <span className="min-w-0 flex-1">
+                          <span className="block break-words text-[16px] font-medium leading-snug">
+                            {s.project}
+                          </span>
+                          <span className="font-data block text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+                            {s.count} {s.count === 1 ? "song" : "songs"} · in
+                            order, from the top
+                          </span>
+                        </span>
+                        <span className="font-pixel shrink-0 text-[11px] text-[var(--accent)]">
+                          ▶ SET
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ol>
+                {(myRank === null || myRank > SET_FULL_RANK) && (
+                  <p className="font-data px-4 pt-3 text-[11px] uppercase leading-relaxed tracking-[0.12em] text-[var(--dim)]">
+                    Full sets run for the top {SET_FULL_RANK}. Below that, a
+                    set plays its first song, then the shuffle takes it back.
+                  </p>
+                )}
+              </>
+            )}
             <ol className="mt-2">
               {results.map((t) => (
                 <li
