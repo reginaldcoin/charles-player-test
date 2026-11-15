@@ -32,7 +32,7 @@
 
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
 import { Privileged } from "@space/privileged";
-import { and, asc, desc, eq, gte, inArray, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, lt, sql } from "drizzle-orm";
 import * as schema from "./schema";
 import { computeReigns } from "./reigns";
 
@@ -971,6 +971,7 @@ export const Actions = {
           builder: z.boolean(),
           champ: z.boolean(),
           hourglass: z.boolean(),
+          streakDays: z.number(),
           score: z.number(),
           minutes: z.number(),
           depth: z.number(),
@@ -1088,6 +1089,42 @@ export const Actions = {
 
       const hourglassIds = await hourglassIdSet(db);
 
+      // Daily streaks on server calendar days: consecutive days with at
+      // least one credited play, counting back from today. A streak with
+      // no play yet today stands through yesterday; it only breaks when
+      // a full day passes with nothing credited.
+      const creditedDays = await db
+        .select({
+          listenerId: schema.plays.listenerId,
+          playedAt: schema.plays.playedAt,
+        })
+        .from(schema.plays)
+        .where(gt(schema.plays.creditedSec, 0));
+      const daysById = new Map<number, Set<number>>();
+      for (const p of creditedDays) {
+        let days = daysById.get(p.listenerId);
+        if (!days) {
+          days = new Set<number>();
+          daysById.set(p.listenerId, days);
+        }
+        days.add(Math.floor(p.playedAt.getTime() / 86_400_000));
+      }
+      const todayIdx = Math.floor(Date.now() / 86_400_000);
+      const streakById = new Map<number, number>();
+      for (const [id, days] of daysById) {
+        let cursor = days.has(todayIdx)
+          ? todayIdx
+          : days.has(todayIdx - 1)
+            ? todayIdx - 1
+            : -1;
+        let n = 0;
+        while (cursor >= 0 && days.has(cursor)) {
+          n++;
+          cursor--;
+        }
+        streakById.set(id, n);
+      }
+
       return {
         listeners: rows.map((r, i) => ({
           rank: i + 1,
@@ -1098,6 +1135,7 @@ export const Actions = {
           builder: r.builder,
           champ: (reigns.get(r.id)?.reigns ?? 0) >= 1,
           hourglass: hourglassIds.has(r.id),
+          streakDays: streakById.get(r.id) ?? 0,
           score: r.score,
           minutes: r.minutes,
           depth: r.depth,

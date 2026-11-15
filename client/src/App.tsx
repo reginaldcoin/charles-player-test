@@ -2810,8 +2810,8 @@ function Standings({
                   {fmtPts1(top.score)}
                 </p>
                 <p className="font-data mt-2 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
-                  {top.minutes} minutes · {top.depth}{" "}
-                  deep
+                  {top.minutes} minutes · {top.depth} deep
+                  {top.streakDays >= 2 && <> · {top.streakDays} day streak</>}
                 </p>
                 {top.reignSinceMs > 0 && (
                   <p className="font-data mt-2 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
@@ -2864,6 +2864,7 @@ function Standings({
                     <span className="font-data block text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
                       {l.minutes} min
                       {l.champMs > 0 && <> · {fmtReign(l.champMs)} as champ</>}
+                      {l.streakDays >= 2 && <> · {l.streakDays} day streak</>}
                     </span>
                     <span className="mt-1 block">
                       <DayBars bars={l.dayBars} />
