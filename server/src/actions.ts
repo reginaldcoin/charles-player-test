@@ -307,6 +307,33 @@ async function listenerAggregates(db: Db, listenerId: number) {
   };
 }
 
+/** Every listener's reign record, replayed from the plays table exactly
+    as getBoard replays it. Champ flair derives from this map — a listener
+    is a champ when reigns ≥ 1 — so it is never stored and never granted. */
+async function reignsById(db: Db) {
+  const all = await db.select().from(schema.listeners);
+  const reignPlays = await db
+    .select({
+      listenerId: schema.plays.listenerId,
+      points: schema.plays.points,
+      finished: schema.plays.finished,
+      playedAt: schema.plays.playedAt,
+      id: schema.plays.id,
+    })
+    .from(schema.plays)
+    .orderBy(asc(schema.plays.playedAt), asc(schema.plays.id));
+  return computeReigns(
+    reignPlays.map((p) => ({
+      listenerId: p.listenerId,
+      points: p.points,
+      finished: p.finished,
+      playedAtMs: p.playedAt.getTime(),
+    })),
+    new Map(all.map((l) => [l.id, l.createdAt.getTime()])),
+    Date.now(),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Shared response shapes
 // ---------------------------------------------------------------------------
@@ -317,6 +344,7 @@ const listenerPublic = z.object({
   code: z.string(),
   bugHunter: z.boolean(),
   builder: z.boolean(),
+  champ: z.boolean(),
 });
 
 const claimResponse = z.object({
@@ -525,7 +553,7 @@ export const Actions = {
           ok: true,
           created: false,
           error: null,
-          listener: { id: found.id, name: found.name, code: found.code, bugHunter: found.bugHunter === 1, builder: found.builder === 1 },
+          listener: { id: found.id, name: found.name, code: found.code, bugHunter: found.bugHunter === 1, builder: found.builder === 1, champ: (((await reignsById(db)).get(found.id)?.reigns ?? 0) >= 1) },
           token,
         };
       }
@@ -555,7 +583,7 @@ export const Actions = {
         ok: true,
         created: true,
         error: null,
-        listener: { id: row.id, name, code, bugHunter: false, builder: false },
+        listener: { id: row.id, name, code, bugHunter: false, builder: false, champ: false },
         token,
       };
     },
@@ -926,6 +954,7 @@ export const Actions = {
           code: z.string(),
           bugHunter: z.boolean(),
           builder: z.boolean(),
+          champ: z.boolean(),
           score: z.number(),
           minutes: z.number(),
           depth: z.number(),
@@ -1049,6 +1078,7 @@ export const Actions = {
           code: r.code,
           bugHunter: r.bugHunter,
           builder: r.builder,
+          champ: (reigns.get(r.id)?.reigns ?? 0) >= 1,
           score: r.score,
           minutes: r.minutes,
           depth: r.depth,
@@ -1371,7 +1401,7 @@ export const Actions = {
       return {
         ok: true,
         error: null,
-        listener: { id: listener.id, name: listener.name, code: listener.code, bugHunter: listener.bugHunter === 1, builder: listener.builder === 1 },
+        listener: { id: listener.id, name: listener.name, code: listener.code, bugHunter: listener.bugHunter === 1, builder: listener.builder === 1, champ: (((await reignsById(db)).get(listener.id)?.reigns ?? 0) >= 1) },
         rank,
         score: round2(state.score),
         minutes: Math.floor(agg.creditedSec / 60),

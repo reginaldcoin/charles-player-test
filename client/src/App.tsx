@@ -127,6 +127,25 @@ function HammerGlyph() {
   );
 }
 
+/** Champ flair: a little pixel crown in the site's accent pink, worn by
+    every listener who has held № 1 at any point. Derived from the reign
+    record, never granted. */
+function ChampGlyph() {
+  const pink = "#ff69b4";
+  const dark = "#b03060";
+  return (
+    <span title="Champ" className="ml-1 inline-flex align-[-2px]">
+      <svg viewBox="0 0 10 10" shapeRendering="crispEdges" aria-hidden className="h-[13px] w-[13px]">
+        <rect x="1" y="2" width="1" height="4" fill={pink} />
+        <rect x="4" y="2" width="2" height="4" fill={pink} />
+        <rect x="8" y="2" width="1" height="4" fill={pink} />
+        <rect x="1" y="6" width="8" height="2" fill={pink} />
+        <rect x="4" y="6" width="2" height="1" fill={dark} />
+      </svg>
+    </span>
+  );
+}
+
 /** Trailing 24 hours of points as 24 tiny pixel bars, oldest first.
     The chart is a data display, so it rides in the shared mini frame
     (.bar-frame) rather than sitting naked on the row or the poster. */
@@ -453,6 +472,7 @@ interface Identity {
   code: string;
   bugHunter?: boolean;
   builder?: boolean;
+  champ?: boolean;
   token: string;
 }
 
@@ -2472,6 +2492,7 @@ export function App() {
                   {identity.name} <TripCode code={identity.code} />
                   {identity.bugHunter && <BugGlyph />}
                   {identity.builder && <HammerGlyph />}
+                  {identity.champ && <ChampGlyph />}
                 </span>{" "}
                 —{" "}
                 {sessionStale ? (
@@ -2750,6 +2771,7 @@ function Standings({
                   </span>
                   {top.bugHunter && <BugGlyph />}
                   {top.builder && <HammerGlyph />}
+                  {top.champ && <ChampGlyph />}
                   <PresenceDot lastActiveMs={top.lastActiveMs} />
                 </p>
                 <p className="font-pixel mt-3 text-[54px] leading-[1.2] text-[var(--accent)]">
@@ -2803,6 +2825,7 @@ function Standings({
                       </span>
                       {l.bugHunter && <BugGlyph />}
                       {l.builder && <HammerGlyph />}
+                      {l.champ && <ChampGlyph />}
                       <PresenceDot lastActiveMs={l.lastActiveMs} />
                     </span>
                     <span className="font-data block text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
@@ -3325,6 +3348,7 @@ function ClaimPanel({
           code: res.listener.code,
           bugHunter: res.listener.bugHunter,
           builder: res.listener.builder,
+          champ: res.listener.champ,
           token: res.token,
         });
       } else {
@@ -3530,6 +3554,7 @@ function MyRoad({
             </span>
             {(data.listener?.bugHunter ?? identity.bugHunter) && <BugGlyph />}
             {(data.listener?.builder ?? identity.builder) && <HammerGlyph />}
+            {(data.listener?.champ ?? identity.champ) && <ChampGlyph />}
           </p>
           <p className="font-data mt-1 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
             {fmtPts2(data.score)} points · {data.minutes} minutes · {data.finishes}{" "}
