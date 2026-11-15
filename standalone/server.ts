@@ -270,8 +270,9 @@ const handleSongPage = createSongPageHandler(CLIENT_DIST);
 // PARKED (2026-11-15, Doucet's call): video clips are off the live
 // surface but preserved, not deleted. The render pipeline still
 // lives in server/clip.ts and its route in standalone/clip-route.ts,
-// simply unwired — no handler is built here and no /clip/ dispatch
-// stands below, so a clip address answers the plain 404. To revive:
+// simply unwired — no handler is built here, and the only /clip/
+// handling below is a refusal, so a clip address answers the plain
+// 404 instead of the app shell. To revive:
 // restore the createClipHandler import, rebuild the handler with a
 // counts reader (a clip carries its song's public hearts + plays
 // baked in at render time, the same two counts getSongStats serves),
@@ -296,6 +297,11 @@ Bun.serve({
     if (req.method === "GET" && url.pathname.startsWith("/s/")) {
       const res = handleSongPage(url);
       if (res) return res;
+    }
+    if (url.pathname.startsWith("/clip/")) {
+      // Parked with the clip feature: a clip address is refused here,
+      // not handed the app shell by the static fallback below.
+      return new Response("not found", { status: 404 });
     }
     if (req.method === "GET" || req.method === "HEAD") {
       const res = serveStatic(url.pathname);
