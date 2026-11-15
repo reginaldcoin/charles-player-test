@@ -47,7 +47,7 @@ export function songPath(idx: number): string {
   return `/s/${SLUG_BY_INDEX[idx] ?? ""}`;
 }
 
-/** The clip address for one catalog track: /clip/<slug> (the start second rides as ?t=). */
+/** The clip address for one catalog track: /clip/<slug> (the start second rides as ?t=). Parked with the clip feature (2026-11-15): unused by the client while clips are off the surface. */
 export function songClipPath(idx: number): string {
   return `/clip/${SLUG_BY_INDEX[idx] ?? ""}`;
 }

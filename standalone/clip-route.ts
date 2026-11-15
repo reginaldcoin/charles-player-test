@@ -1,3 +1,8 @@
+// PARKED (2026-11-15, Doucet's call): this route is not wired into
+// standalone/server.ts — clips are off the live surface, preserved
+// here and in server/clip.ts for a possible return. See the PARKED
+// note in standalone/server.ts for how to revive it.
+//
 // GET /clip/<slug>?t=<start-sec> — a song's 30-second clip, rendered
 // on first request and cached on the data volume beside the database
 // (see server/clip.ts for the render itself).
