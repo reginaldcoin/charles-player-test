@@ -74,6 +74,18 @@ function fmtReign(ms: number): string {
   return `${mins} min`;
 }
 
+/** A headline's age in timeline words: "just now", "2h ago", "3d ago". */
+function fmtAgo(atMs: number): string {
+  const s = Math.max(0, Math.floor((Date.now() - atMs) / 1000));
+  if (s < 60) return "just now";
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
+}
+
 /** A listener's public !code, in classic tripcode green. */
 function TripCode({ code }: { code: string }) {
   return <span className="trip">!{code}</span>;
@@ -128,19 +140,19 @@ function HammerGlyph() {
   );
 }
 
-/** Champ flair: a little pixel crown in the site's accent pink, worn by
-    every listener who has held № 1 at any point. Derived from the reign
-    record, never granted. */
+/** Champ flair: a little pixel crown in gold, worn by every listener
+    who has held № 1 at any point. Derived from the reign record, never
+    granted. */
 function ChampGlyph() {
-  const pink = "#ff69b4";
-  const dark = "#b03060";
+  const gold = "#ffd700";
+  const dark = "#b8860b";
   return (
     <span title="Champ" className="ml-1 inline-flex align-[-2px]">
       <svg viewBox="0 0 10 10" shapeRendering="crispEdges" aria-hidden className="h-[13px] w-[13px]">
-        <rect x="1" y="2" width="1" height="4" fill={pink} />
-        <rect x="4" y="2" width="2" height="4" fill={pink} />
-        <rect x="8" y="2" width="1" height="4" fill={pink} />
-        <rect x="1" y="6" width="8" height="2" fill={pink} />
+        <rect x="1" y="2" width="1" height="4" fill={gold} />
+        <rect x="4" y="2" width="2" height="4" fill={gold} />
+        <rect x="8" y="2" width="1" height="4" fill={gold} />
+        <rect x="1" y="6" width="8" height="2" fill={gold} />
         <rect x="4" y="6" width="2" height="1" fill={dark} />
       </svg>
     </span>
@@ -152,7 +164,7 @@ function ChampGlyph() {
     session record, never granted. */
 function HourglassGlyph() {
   const glass = "#c084fc";
-  const sand = "#fde047";
+  const sand = "#b08968";
   return (
     <span title="Hourglass" className="ml-1 inline-flex align-[-2px]">
       <svg viewBox="0 0 10 10" shapeRendering="crispEdges" aria-hidden className="h-[13px] w-[13px]">
@@ -525,6 +537,7 @@ type View = "player" | "standings" | "road" | "backroom" | "song";
 
 type BoardData = ApiResponse<typeof api, "getBoard">;
 type LoveBoardData = ApiResponse<typeof api, "getLoveBoard">;
+type HistoryData = ApiResponse<typeof api, "getHistory">;
 type RoadData = ApiResponse<typeof api, "getMyRoad">;
 type TrackBoardData = ApiResponse<typeof api, "getTrackBoard">;
 
@@ -3028,6 +3041,162 @@ function Standings({
       {love.data && (
         <MostLoved data={love.data} onPlayTrack={onPlayTrack} />
       )}
+
+      <HistorySection />
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// HISTORY — the board's life and the site's life in one stream, at the
+// foot of the standings. The current reign stays pinned over the feed;
+// below it, headlines newest first: every crossing on the board and
+// every site update the operators post. Filters are this room's own —
+// the server sends one merged stream, the tabs just narrow the read.
+// ---------------------------------------------------------------------------
+
+function HistorySection() {
+  const history = useQuery({
+    queryKey: ["history"],
+    queryFn: () => api.getHistory({}),
+    refetchInterval: 30000,
+  });
+  const [filter, setFilter] = useState<"all" | "battle" | "updates">("all");
+
+  const data: HistoryData | undefined = history.data;
+  const items =
+    data?.items.filter((item) =>
+      filter === "all"
+        ? true
+        : filter === "battle"
+          ? item.kind === "crossing"
+          : item.kind === "update",
+    ) ?? [];
+
+  const tabs = [
+    ["all", "ALL"],
+    ["battle", "POINT BATTLE"],
+    ["updates", "SITE UPDATES"],
+  ] as const;
+
+  return (
+    <section aria-label="History" className="mt-6">
+      <div className="px-4">
+        <div className="nes-container with-title px-4 py-3">
+          <h3 className="title column-title font-pixel text-[11px]">
+            HISTORY
+          </h3>
+          <p className="font-data text-[11px] uppercase leading-relaxed tracking-[0.12em] text-[var(--dim)]">
+            Every pass on the board, and every change to the house —
+            newest first.
+          </p>
+        </div>
+      </div>
+
+      <div className="px-4 pt-4">
+        <div className="nes-container px-5 py-4">
+          {history.isPending ? (
+            <p className="font-data text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+              Reading the history…
+            </p>
+          ) : history.error || !data ? (
+            <>
+              <p className="text-base">The history won't read right now.</p>
+              <button
+                type="button"
+                onClick={() => void history.refetch()}
+                className="font-data mt-3 text-[11px] uppercase tracking-[0.12em] underline underline-offset-4"
+              >
+                Try again
+              </button>
+            </>
+          ) : (
+            <>
+              {data.reign && (
+                <div className="border-b-4 border-[var(--border)] pb-4">
+                  <p className="font-data text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+                    Pinned · the reign
+                  </p>
+                  <p className="mt-2 break-words text-[20px] font-semibold leading-relaxed">
+                    {data.reign.name} <ChampGlyph />{" "}
+                    <span className="font-data text-[14px] text-[var(--dim)]">
+                      <TripCode code={data.reign.code} />
+                    </span>
+                  </p>
+                  <p className="font-data mt-1 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+                    Holds № 1 · reigning{" "}
+                    <span className="text-[var(--accent)]">
+                      {fmtReign(Date.now() - data.reign.sinceMs)}
+                    </span>
+                  </p>
+                </div>
+              )}
+
+              <div
+                className="mt-4 grid grid-cols-3 gap-2"
+                role="group"
+                aria-label="History filter"
+              >
+                {tabs.map(([key, label]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    aria-pressed={filter === key}
+                    onClick={() => setFilter(key)}
+                    className={`font-pixel min-h-[44px] px-2 text-[11px] ${
+                      filter === key
+                        ? "bg-[var(--accent)] text-[var(--on-accent)]"
+                        : "border border-[var(--border)] text-[var(--text)]"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {items.length === 0 ? (
+                <p className="py-6 text-base leading-relaxed">
+                  {data.items.length === 0
+                    ? "Nothing yet. The board writes its own history."
+                    : filter === "battle"
+                      ? "No crossings on the record yet."
+                      : "No site updates posted yet."}
+                </p>
+              ) : (
+                <div className="mt-2 max-h-[430px] overflow-y-auto">
+                  <ol>
+                    {items.map((item, i) => (
+                      <li
+                        key={`${item.kind}-${item.id ?? "x"}-${item.atMs}-${i}`}
+                        className="border-b border-dashed border-[var(--dim)] py-3 last:border-b-0"
+                      >
+                        <p
+                          className={`text-[15px] leading-relaxed ${
+                            item.crown
+                              ? "font-semibold text-[var(--accent)]"
+                              : ""
+                          }`}
+                        >
+                          {item.crown && <ChampGlyph />}{" "}
+                          {item.kind === "update" && (
+                            <span className="font-data mr-2 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+                              Site
+                            </span>
+                          )}
+                          {item.text}
+                        </p>
+                        <p className="font-data mt-1 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+                          {fmtAgo(item.atMs)}
+                        </p>
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
     </section>
   );
 }
@@ -3996,10 +4165,21 @@ function OperatorTools({ identity }: { identity: Identity }) {
     ok: boolean;
     text: string;
   } | null>(null);
+  const [updateText, setUpdateText] = useState("");
+  const [updateResult, setUpdateResult] = useState<{
+    ok: boolean;
+    text: string;
+  } | null>(null);
   const board = useQuery({
     queryKey: ["board"],
     queryFn: () => api.getBoard({}),
   });
+  const historyFeed = useQuery({
+    queryKey: ["history"],
+    queryFn: () => api.getHistory({}),
+  });
+  const postedUpdates =
+    historyFeed.data?.items.filter((item) => item.kind === "update") ?? [];
   const hunters =
     board.data?.listeners.filter((listener) => listener.bugHunter) ?? [];
   const builders =
@@ -4058,6 +4238,49 @@ function OperatorTools({ identity }: { identity: Identity }) {
     },
     onError: () =>
       setBuilderResult({
+        ok: false,
+        text: "The board won't answer right now. Try again.",
+      }),
+  });
+
+  const postUpdate = useMutation({
+    mutationFn: () =>
+      api.postSiteUpdate({ token: identity.token, text: updateText }),
+    onSuccess: (res) => {
+      if (res.ok) {
+        setUpdateText("");
+        setUpdateResult({ ok: true, text: "Posted to the history." });
+        void queryClient.invalidateQueries({ queryKey: ["history"] });
+      } else {
+        setUpdateResult({
+          ok: false,
+          text: res.error ?? "That didn't work. Try again.",
+        });
+      }
+    },
+    onError: () =>
+      setUpdateResult({
+        ok: false,
+        text: "The board won't answer right now. Try again.",
+      }),
+  });
+
+  const deleteUpdate = useMutation({
+    mutationFn: (id: number) =>
+      api.deleteSiteUpdate({ token: identity.token, id }),
+    onSuccess: (res) => {
+      if (res.ok) {
+        setUpdateResult({ ok: true, text: "Taken out of the history." });
+        void queryClient.invalidateQueries({ queryKey: ["history"] });
+      } else {
+        setUpdateResult({
+          ok: false,
+          text: res.error ?? "That didn't work. Try again.",
+        });
+      }
+    },
+    onError: () =>
+      setUpdateResult({
         ok: false,
         text: "The board won't answer right now. Try again.",
       }),
@@ -4286,6 +4509,85 @@ function OperatorTools({ identity }: { identity: Identity }) {
             </p>
           )}
         </form>
+
+        <p className="font-data mt-8 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+          Site updates
+        </p>
+        <p className="mt-2 text-base leading-relaxed">
+          Post a headline to the history on the board. Your words land
+          verbatim, with their time.
+        </p>
+
+        <form
+          className="mt-4"
+          onSubmit={(e) => {
+            e.preventDefault();
+            setUpdateResult(null);
+            postUpdate.mutate();
+          }}
+        >
+          <div className="nes-field">
+            <label
+              htmlFor="operator-update-text"
+              className="font-data block text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]"
+            >
+              Headline
+            </label>
+            <input
+              id="operator-update-text"
+              aria-label="Site update headline"
+              value={updateText}
+              onChange={(e) => setUpdateText(e.target.value)}
+              autoComplete="off"
+              maxLength={280}
+              className="nes-input is-dark mt-1 min-h-[48px] w-full text-[16px]"
+            />
+          </div>
+          <button
+            type="submit"
+            disabled={postUpdate.isPending || updateText.trim().length === 0}
+            className="nes-btn is-pink font-pixel mt-5 min-h-[48px] w-full px-4 text-[14px] disabled:opacity-40"
+          >
+            {postUpdate.isPending ? "Working…" : "Post a site update"}
+          </button>
+          {updateResult && (
+            <p
+              role={updateResult.ok ? "status" : "alert"}
+              className={`mt-4 text-[15px] leading-relaxed ${
+                updateResult.ok ? "text-[#4ade80]" : "text-[#f87171]"
+              }`}
+            >
+              {updateResult.text}
+            </p>
+          )}
+        </form>
+
+        {postedUpdates.length > 0 && (
+          <ul className="mt-4">
+            {postedUpdates.map((item) => (
+              <li
+                key={item.id ?? item.atMs}
+                className="flex min-h-[44px] flex-wrap items-center gap-x-3 py-1 text-[16px]"
+              >
+                <span className="min-w-0 flex-1 break-words">{item.text}</span>
+                <span className="font-data text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+                  {fmtAgo(item.atMs)}
+                </span>
+                <button
+                  type="button"
+                  disabled={deleteUpdate.isPending}
+                  onClick={() => {
+                    setUpdateResult(null);
+                    if (item.id != null) deleteUpdate.mutate(item.id);
+                  }}
+                  className="font-data text-[11px] uppercase tracking-[0.12em] underline underline-offset-4 disabled:opacity-40"
+                >
+                  Take it down
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
     </div>
   );

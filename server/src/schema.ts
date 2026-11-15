@@ -122,6 +122,20 @@ export const crashReports = sqliteTable("crash_reports", {
   payload: text("payload").notNull(),
 });
 
+// Site updates: one-line headlines the operators post from the back
+// room into the board's HISTORY feed (ships, changes, notices). The
+// operator's words are the headline, verbatim; the row's time is the
+// headline's time. Crossings in the same feed are NOT stored — they
+// are re-derived from the plays ledger on every read, exactly like
+// reigns, so a re-judged record rewrites them too.
+export const siteUpdates = sqliteTable("site_updates", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  text: text("text").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
 // Hearts: a listener's favorited tracks, keyed exactly the way plays are
 // logged (trackTitle + project). Purely personal — a heart never touches
 // score, state, or plays.

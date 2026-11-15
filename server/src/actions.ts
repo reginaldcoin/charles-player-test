@@ -35,6 +35,7 @@ import { Privileged } from "@space/privileged";
 import { and, asc, desc, eq, gt, gte, inArray, lt, sql } from "drizzle-orm";
 import * as schema from "./schema";
 import { computeReigns } from "./reigns";
+import { computeCrossings, crossingHeadline } from "./crossings";
 
 type Db = ReturnType<Ctx["db"]>;
 
@@ -1996,6 +1997,200 @@ export const Actions = {
           };
         }),
       };
+    },
+  }),
+
+  getHistory: defineAction({
+    description:
+      "Returns the board's HISTORY feed: the current reign pinned on top, then one merged stream of headlines, newest first — crossings (every pass on the board, re-derived from the plays ledger by replay) and site updates (posted by the operators), capped at the latest 50. Public, like the board itself.",
+    request: z.object({}),
+    response: z.object({
+      reign: z
+        .object({
+          name: z.string(),
+          code: z.string(),
+          sinceMs: z.number(),
+        })
+        .nullable(),
+      items: z.array(
+        z.object({
+          kind: z.enum(["crossing", "update"]),
+          id: z.number().nullable(),
+          atMs: z.number(),
+          text: z.string(),
+          crown: z.boolean(),
+          topTen: z.boolean(),
+        }),
+      ),
+    }),
+    async handler(ctx) {
+      const db = ctx.db<typeof schema>();
+      const all = await db.select().from(schema.listeners);
+      const byId = new Map(all.map((l) => [l.id, l]));
+
+      // The pinned reign: whoever holds № 1 now, and since when — read
+      // off the same replay getBoard consumes, never stored.
+      const reigns = await reignsById(db);
+      let reign: { name: string; code: string; sinceMs: number } | null =
+        null;
+      for (const l of all) {
+        const since = reigns.get(l.id)?.reignSinceMs ?? 0;
+        if (since > 0) {
+          reign = { name: l.name, code: l.code, sinceMs: since };
+          break;
+        }
+      }
+
+      // Crossings: full replay (rank state must be right at every
+      // step), keeping only the newest stretch — the merged cap shows
+      // the latest 50 items, so crossings older than the newest few
+      // hundred can never surface once updates interleave.
+      const crossPlays = await db
+        .select({
+          listenerId: schema.plays.listenerId,
+          points: schema.plays.points,
+          finished: schema.plays.finished,
+          playedAt: schema.plays.playedAt,
+          id: schema.plays.id,
+        })
+        .from(schema.plays)
+        .orderBy(asc(schema.plays.playedAt), asc(schema.plays.id));
+      const crossings = computeCrossings(
+        crossPlays.map((p) => ({
+          listenerId: p.listenerId,
+          points: p.points,
+          finished: p.finished,
+          playedAtMs: p.playedAt.getTime(),
+        })),
+        new Map(all.map((l) => [l.id, l.createdAt.getTime()])),
+      ).slice(-200);
+
+      const updates = await db
+        .select()
+        .from(schema.siteUpdates)
+        .orderBy(desc(schema.siteUpdates.id))
+        .limit(100);
+
+      type Item = {
+        kind: "crossing" | "update";
+        id: number | null;
+        atMs: number;
+        text: string;
+        crown: boolean;
+        topTen: boolean;
+        seq: number;
+      };
+      const items: Item[] = [];
+      for (const ev of crossings) {
+        const crosser = byId.get(ev.crosserId);
+        const crossed = byId.get(ev.crossedId);
+        if (!crosser || !crossed) continue;
+        items.push({
+          kind: "crossing",
+          id: null,
+          atMs: ev.atMs,
+          text: crossingHeadline(ev, crosser.name, crossed.name),
+          crown: ev.newRank === 1,
+          topTen: ev.newRank <= 10,
+          seq: ev.seq,
+        });
+      }
+      for (const u of updates) {
+        items.push({
+          kind: "update",
+          id: u.id,
+          atMs: u.createdAt.getTime(),
+          text: u.text,
+          crown: false,
+          topTen: false,
+          seq: u.id,
+        });
+      }
+      // Newest first; a dead tie goes to the operator's word, then to
+      // the later sequence — deterministic on every read.
+      items.sort(
+        (a, b) =>
+          b.atMs - a.atMs ||
+          (a.kind === b.kind ? 0 : a.kind === "update" ? -1 : 1) ||
+          b.seq - a.seq,
+      );
+      return {
+        reign,
+        items: items.slice(0, 50).map(({ seq: _seq, ...rest }) => rest),
+      };
+    },
+  }),
+
+  postSiteUpdate: defineAction({
+    description:
+      "Operators only: posts a one-line site update into the board's HISTORY feed. The operator's words are the headline, verbatim.",
+    request: z.object({
+      token: z.string().min(1),
+      text: z.string().min(1).max(280),
+    }),
+    response: z.object({
+      ok: z.boolean(),
+      error: z.string().nullable(),
+      id: z.number().nullable(),
+    }),
+    async handler(ctx, args) {
+      const db = ctx.db<typeof schema>();
+      const me = await resolveListener(db, args.token);
+      if (!me) {
+        return { ok: false, error: "Not signed in.", id: null };
+      }
+      if (!OPERATOR_CODES.includes(me.code)) {
+        return {
+          ok: false,
+          error: "Only the operators can post to the history.",
+          id: null,
+        };
+      }
+      const text = args.text.trim();
+      if (!text) {
+        return { ok: false, error: "Say something first.", id: null };
+      }
+      const inserted = await db
+        .insert(schema.siteUpdates)
+        .values({ text })
+        .returning({ id: schema.siteUpdates.id });
+      ctx.invalidateQueries();
+      return { ok: true, error: null, id: inserted[0]?.id ?? null };
+    },
+  }),
+
+  deleteSiteUpdate: defineAction({
+    description:
+      "Operators only: takes a site update back out of the HISTORY feed.",
+    request: z.object({
+      token: z.string().min(1),
+      id: z.number().int().positive(),
+    }),
+    response: z.object({
+      ok: z.boolean(),
+      error: z.string().nullable(),
+    }),
+    async handler(ctx, args) {
+      const db = ctx.db<typeof schema>();
+      const me = await resolveListener(db, args.token);
+      if (!me) {
+        return { ok: false, error: "Not signed in." };
+      }
+      if (!OPERATOR_CODES.includes(me.code)) {
+        return {
+          ok: false,
+          error: "Only the operators can post to the history.",
+        };
+      }
+      const deleted = await db
+        .delete(schema.siteUpdates)
+        .where(eq(schema.siteUpdates.id, args.id))
+        .returning({ id: schema.siteUpdates.id });
+      if (deleted.length === 0) {
+        return { ok: false, error: "No update carries that number." };
+      }
+      ctx.invalidateQueries();
+      return { ok: true, error: null };
     },
   }),
 } satisfies ActionsModule;
