@@ -22,6 +22,8 @@
 // site's hot pink #ff69b4 and cresting white. The track-change rule is
 // the same hot pink. No bone or cream tones anywhere.
 
+import { recEvent } from "./recorder";
+
 interface Palette {
   bg: string;
   stops: [number, [number, number, number]][];
@@ -73,6 +75,16 @@ function colorFor(palette: Palette, v: number): string {
  */
 export type TapeColumnProvider = () => ArrayLike<number> | null;
 
+/**
+ * One retained column, kept exactly as the painter computed it
+ * (2026-11-15): either a solid full-height fill (track-change rule,
+ * unplayed field, no-fingerprint ground), or the per-band color
+ * strings of a signal column. The tape retains the last screenful so
+ * a wake can redraw the tapestry from data instead of trusting a
+ * bitmap the OS may have damaged in the night.
+ */
+type RetainedColumn = { fill: string } | { bands: string[] };
+
 export class TapeRenderer {
   private canvas: HTMLCanvasElement | null = null;
   private g: CanvasRenderingContext2D | null = null;
@@ -82,6 +94,7 @@ export class TapeRenderer {
   private changePending = false;
   private playing = false;
   private reducedMotion = false;
+  private history: RetainedColumn[] = [];
 
   attach(canvas: HTMLCanvasElement, getColumn: TapeColumnProvider) {
     this.canvas = canvas;
@@ -130,6 +143,61 @@ export class TapeRenderer {
       g.fillRect(0, 0, w, h);
       g.drawImage(old, 0, 0, old.width, old.height, 0, 0, w, h);
     }
+    // Flight-recorder stamp (2026-11-15): every resize testifies to
+    // the geometry it settled on, so the next wake-wrecked tape
+    // carries its own evidence. Recorder-only; paints nothing.
+    recEvent("taperesize", {
+      note: `w=${canvas.width} h=${canvas.height} dpr=${dpr}`,
+    });
+  }
+
+  /** Redraw the tapestry from the retained columns (2026-11-15, the
+      wake repair). Chrome can damage a canvas bitmap while the device
+      sleeps; the incremental renderer alone heals that only by
+      scrolling it off, a minute or more of foreground ticking. The
+      player calls resize() then repaint() on wake: geometry first,
+      then the picture rebuilt from data. Columns older than the
+      retained screenful are gone — that side of the tape is field,
+      exactly what a fresh tape shows before play covers it. */
+  repaint() {
+    const canvas = this.canvas;
+    const g = this.g;
+    if (!canvas || !g) return;
+    if (this.reducedMotion) {
+      this.drawPoster();
+      return;
+    }
+    const w = canvas.width;
+    const h = canvas.height;
+    g.fillStyle = FIELD_COLOR;
+    g.fillRect(0, 0, w, h);
+    const bandH = h / BANDS;
+    const cols = this.history;
+    for (let i = 0; i < cols.length; i++) {
+      const x = w - (cols.length - i) * COL_W;
+      if (x + COL_W <= 0) continue;
+      const col = cols[i] as RetainedColumn;
+      if ("fill" in col) {
+        g.fillStyle = col.fill;
+        g.fillRect(x, 0, COL_W, h);
+      } else {
+        for (let b = 0; b < BANDS; b++) {
+          g.fillStyle = col.bands[b] ?? PALETTE.bg;
+          g.fillRect(x, h - (b + 1) * bandH, COL_W, bandH + 1);
+        }
+      }
+    }
+  }
+
+  /** Keep a painted column for repaint(): the newest COL_W slice,
+      capped at one screenful (the oldest scroll off, as they do on
+      the bitmap itself). */
+  private retain(col: RetainedColumn) {
+    const canvas = this.canvas;
+    if (!canvas) return;
+    this.history.push(col);
+    const cap = Math.max(1, Math.ceil(canvas.width / COL_W));
+    while (this.history.length > cap) this.history.shift();
   }
 
   destroy() {
@@ -204,6 +272,7 @@ export class TapeRenderer {
       this.changePending = false;
       g.fillStyle = RULE_COLOR;
       g.fillRect(x, 0, COL_W, h);
+      this.retain({ fill: RULE_COLOR });
       return;
     }
 
@@ -211,6 +280,7 @@ export class TapeRenderer {
       // Not playing: the column is field, not signal — run it white.
       g.fillStyle = FIELD_COLOR;
       g.fillRect(x, 0, COL_W, h);
+      this.retain({ fill: FIELD_COLOR });
       return;
     }
 
@@ -221,16 +291,21 @@ export class TapeRenderer {
       // when no analysis existed. The music is never delayed for it.
       g.fillStyle = palette.bg;
       g.fillRect(x, 0, COL_W, h);
+      this.retain({ fill: palette.bg });
       return;
     }
 
     const bandH = h / BANDS;
+    const colors: string[] = new Array<string>(BANDS);
     for (let b = 0; b < BANDS; b++) {
       const raw = (column[b] ?? 0) / 255;
       // Gentle gamma lift so quiet passages still read on the tape.
       const v = Math.pow(raw, 0.72);
-      g.fillStyle = colorFor(palette, v);
+      const c = colorFor(palette, v);
+      colors[b] = c;
+      g.fillStyle = c;
       g.fillRect(x, h - (b + 1) * bandH, COL_W, bandH + 1);
     }
+    this.retain({ bands: colors });
   }
 }

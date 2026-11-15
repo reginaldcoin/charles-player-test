@@ -562,9 +562,17 @@ export function App() {
   // itself — ends the episode, and only an episode still standing when
   // the interval ticks gets auto-resumed. User pause intent also flows
   // through the same event, so a user pause is never overridden live.
-  const stolenRef = useRef<{ attempts: number; lastTryAt: number } | null>(
-    null,
-  );
+  // Settled latch (2026-11-15): settling no longer nulls the episode;
+  // it marks it settled, and a settled episode raises no new episode
+  // until an element 'play' or 'pause' event or a track change clears
+  // it. Without the latch, the tick after a settle raised a fresh
+  // episode and the branch retried in cycles — all night, in the dark.
+  const stolenRef = useRef<{
+    attempts: number;
+    lastTryAt: number;
+    track: number;
+    settled: boolean;
+  } | null>(null);
   // Stall watchdog: last position the audio clock actually reached, the
   // wall time it got there, and how many recoveries this track has had.
   const lastProgressRef = useRef(0);
@@ -1336,6 +1344,10 @@ export function App() {
       recEvent("play", recSnap());
       isPlayingRef.current = true;
       setIsPlaying(true);
+      // A play event ends a stolen-audio episode too, settled latch
+      // included (the pause listener below does the same): the sound
+      // is back, so a later steal starts a fresh episode.
+      stolenRef.current = null;
       try {
         if ("mediaSession" in navigator)
           navigator.mediaSession.playbackState = "playing";
@@ -1554,40 +1566,77 @@ export function App() {
         lastTimeRef.current = audio.currentTime;
         sampleAtRef.current = Date.now();
         // Auto-resume (Addendum 2): the element sits paused. If the UI
-        // state says playing, we are VISIBLE, and no pause event ever
-        // landed, this is a silent steal/freeze, not a user pause —
-        // raise (or continue) the episode and try to take the sound
-        // back from the element's frozen position. Bounded: at most 3
-        // attempts, spaced by the stall window (6s, 3s on a stall
-        // hint); then settle paused and stop trying. If the page was
-        // fully suspended this interval never ran, and the foreground
-        // reconcile covers the return instead.
+        // state says playing and no pause event ever landed, this is
+        // a silent steal/freeze, not a user pause — raise (or
+        // continue) the episode and try to take the sound back from
+        // the element's frozen position. Bounded: at most 3 attempts,
+        // spaced by the stall window (6s, 3s on a stall hint); then
+        // settle paused and stop trying. Since 2026-11-15 the branch
+        // also runs while the page is HIDDEN: a steal-pause in the
+        // dark previously had no recovery path at all until wake (the
+        // ladder skips paused elements; the reconcile needs a
+        // visibility event), and a page left paused is the page
+        // Chrome freezes. Whatever throttled beats this interval gets
+        // in the dark now spend the same bounded attempts. If the
+        // page was fully suspended this interval never ran, and the
+        // foreground reconcile covers the return instead.
         if (
           audio.paused &&
           !audio.ended &&
           isPlayingRef.current &&
-          currentRef.current >= 0 &&
-          document.visibilityState === "visible"
+          currentRef.current >= 0
         ) {
-          const ep = stolenRef.current ?? { attempts: 0, lastTryAt: 0 };
-          stolenRef.current = ep;
-          const spacing = stallHintRef.current ? 3000 : 6000;
+          // An episode belongs to the track that raised it; a track
+          // change buries it, settled latch and all.
           if (
-            ep.attempts < 3 &&
-            Date.now() - ep.lastTryAt >= spacing
+            stolenRef.current &&
+            stolenRef.current.track !== currentRef.current
           ) {
-            ep.attempts += 1;
-            ep.lastTryAt = Date.now();
-            void audio.play().catch(() => undefined);
-          } else if (
-            ep.attempts >= 3 &&
-            Date.now() - ep.lastTryAt >= spacing
-          ) {
-            // Retries exhausted: settle per mechanism A.
             stolenRef.current = null;
-            setIsPlaying(false);
-            setLastAward("THAT TRACK WON'T PLAY — PRESS PLAY TO TRY AGAIN");
-            window.setTimeout(() => setLastAward(null), 5000);
+          }
+          // Settled latch (2026-11-15): a settled episode stays
+          // settled — no fresh episode, no more attempts, no more
+          // stamps — until an element 'play' or 'pause' event (the
+          // listeners above null the episode) or the track change
+          // just handled clears it. The tick itself never clears it.
+          if (!stolenRef.current?.settled) {
+            const freshEpisode = stolenRef.current === null;
+            const ep = stolenRef.current ?? {
+              attempts: 0,
+              lastTryAt: 0,
+              track: currentRef.current,
+              settled: false,
+            };
+            stolenRef.current = ep;
+            const dark = document.visibilityState === "hidden";
+            if (freshEpisode && dark) {
+              // First sight of a dark pause: stamp it, so the next
+              // field night testifies instead of posing for a
+              // screenshot. Recorder-only; the branch behaves the same.
+              recEvent("darkpause", { ...recSnap(), stage: 0 });
+            }
+            const spacing = stallHintRef.current ? 3000 : 6000;
+            if (
+              ep.attempts < 3 &&
+              Date.now() - ep.lastTryAt >= spacing
+            ) {
+              ep.attempts += 1;
+              ep.lastTryAt = Date.now();
+              if (dark) {
+                recEvent("darkpause", { ...recSnap(), stage: ep.attempts });
+              }
+              void audio.play().catch(() => undefined);
+            } else if (
+              ep.attempts >= 3 &&
+              Date.now() - ep.lastTryAt >= spacing
+            ) {
+              // Retries exhausted: settle per mechanism A, and latch
+              // the episode so the settle is final for this steal.
+              ep.settled = true;
+              setIsPlaying(false);
+              setLastAward("THAT TRACK WON'T PLAY — PRESS PLAY TO TRY AGAIN");
+              window.setTimeout(() => setLastAward(null), 5000);
+            }
           }
         }
       }
@@ -1991,8 +2040,26 @@ export function App() {
     tapeRef.current = tape;
     const onResize = () => tape.resize();
     window.addEventListener("resize", onResize);
+    // Wake repair (2026-11-15): Chrome can damage the canvas bitmap
+    // while the device sleeps, and the incremental tape alone heals
+    // that only by scrolling it off. On return, rebuild it: resize()
+    // restores the geometry, repaint() redraws the tapestry from the
+    // retained columns. These ears live with the tape's own lifecycle;
+    // the WakeLock, hide-flush, reconcile, and recorder listeners
+    // elsewhere are untouched.
+    const onTapeWake = () => {
+      tape.resize();
+      tape.repaint();
+    };
+    const onTapeVis = () => {
+      if (document.visibilityState === "visible") onTapeWake();
+    };
+    document.addEventListener("visibilitychange", onTapeVis);
+    window.addEventListener("pageshow", onTapeWake);
     return () => {
       window.removeEventListener("resize", onResize);
+      document.removeEventListener("visibilitychange", onTapeVis);
+      window.removeEventListener("pageshow", onTapeWake);
       tape.destroy();
       tapeRef.current = null;
     };
