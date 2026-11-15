@@ -267,6 +267,22 @@ function PresenceDot({ lastActiveMs }: { lastActiveMs: number }) {
   );
 }
 
+/**
+ * The now-playing poster's title size, stepped down by title length.
+ * Press Start 2P advances a full em per glyph, spaces included, so at
+ * poster size a long title's longest unbroken token is wider than the
+ * frame and the poster clips it mid-word. The size steps down as the
+ * title grows, and the title itself wraps anywhere (see the h1), so
+ * the whole title always fits its frame.
+ */
+function posterTitleSize(rawTitle: string | undefined): string {
+  const len = (rawTitle ?? "").length;
+  if (len <= 24) return "text-[30px] sm:text-[54px]";
+  if (len <= 48) return "text-[24px] sm:text-[40px]";
+  if (len <= 80) return "text-[16px] sm:text-[26px]";
+  return "text-[15px] sm:text-[24px]";
+}
+
 /** Charles's birthday: November 10, viewer-local. */
 function isCharlesBirthday(d: Date): boolean {
   return d.getMonth() === 10 && d.getDate() === 10;
@@ -2509,7 +2525,9 @@ export function App() {
               {nowTrack ? `Now playing · ${nowTrack.project}` : "Now playing"}
             </p>
             <div className="mt-3 flex items-start justify-between gap-3">
-              <h1 className="font-pixel break-words text-[30px] leading-[1.15] sm:text-[54px]">
+              <h1
+                className={`font-pixel min-w-0 [overflow-wrap:anywhere] leading-[1.15] ${posterTitleSize(nowTrack?.title)}`}
+              >
                 {nowTrack ? nowTrack.title.toUpperCase() : "—"}
               </h1>
               {identity && nowTrack && (
