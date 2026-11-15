@@ -20,3 +20,38 @@ jobs:
         run: flyctl deploy --remote-only
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      - name: Post the ship's headline to HISTORY
+        if: github.event_name == 'push'
+        continue-on-error: true
+        env:
+          SITE_UPDATE_INGEST_KEY: ${{ secrets.SITE_UPDATE_INGEST_KEY }}
+        run: |
+          set -u
+          HEADLINE=$(git log -1 --format=%B | sed -n 's/^Headline:[[:space:]]*//p' | head -n 1)
+          if [ -z "$HEADLINE" ]; then
+            echo "No Headline: trailer on this commit — staying silent by design."
+            exit 0
+          fi
+          SHA=$(git rev-parse HEAD)
+          AT_MS=$(( $(git log -1 --format=%ct) * 1000 ))
+          echo "Posting headline for $SHA: $HEADLINE"
+          PAYLOAD=$(jq -n \
+            --arg key "$SITE_UPDATE_INGEST_KEY" \
+            --arg text "$HEADLINE" \
+            --argjson atMs "$AT_MS" \
+            --arg sourceRef "$SHA" \
+            '{action: "ingestSiteUpdate", args: {key: $key, text: $text, atMs: $atMs, sourceRef: $sourceRef}}')
+          # The deploy just landed; the new build may take a moment to
+          # serve. Retry for up to ~2 minutes, then report honestly.
+          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            RESP=$(curl -sS -X POST https://listen.charleshamilton.app/actions \
+              -H 'content-type: application/json' -d "$PAYLOAD" 2>/dev/null) || RESP=""
+            if printf '%s' "$RESP" | grep -q '"ok":true'; then
+              echo "Headline posted: $RESP"
+              exit 0
+            fi
+            echo "Attempt $attempt: not landed yet (response: ${RESP:-no response})"
+            sleep 10
+          done
+          echo "Headline post FAILED after all retries. Last response: ${RESP:-none}"
+          exit 1
