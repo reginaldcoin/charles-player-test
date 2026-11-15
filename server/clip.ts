@@ -16,8 +16,8 @@
 // on the page. The falls run around the frame and glow through its
 // dark panel; no word sits on naked waterfall.
 //
-// Rendered here on the server with ffmpeg, once per (song, start
-// second), and cached by the host (see standalone/clip-route.ts). A
+// Rendered here on the server with ffmpeg and cached by the host
+// (see standalone/clip-route.ts). A
 // clip is a snapshot: the counts it carries are the counts at render
 // time, and rendering one never moves any number — plays still come
 // only from playing.
@@ -39,7 +39,18 @@ const FONT = join(
 
 export const CLIP_SEC = 30;
 const FFMPEG_PASS_TIMEOUT_MS = 5 * 60 * 1000;
-const SIZE = 1080;
+// The artwork is mastered at 1080 square through every internal pass.
+// Only the finished composite is downscaled, to the 720-square export
+// below: rendering the spectrogram, card, and overlay at the larger
+// size gives the Lanczos downscale clean detail to work from instead
+// of asking the encoder to invent edges at the smaller size.
+const MASTER_SIZE = 1080;
+const EXPORT_SIZE = 720;
+const EXPORT_CRF = 23;
+// The cache route versions clip files with this tag. Bump it whenever
+// the export recipe changes, so an older encode is bypassed rather
+// than served as though it were the current export.
+export const CLIP_EXPORT_CACHE_TAG = `export-${EXPORT_SIZE}-crf${EXPORT_CRF}`;
 const PINK = "0xff69b4";
 const DIM = "0xbfbfbf";
 const WHITE = "0xffffff";
@@ -339,7 +350,7 @@ export async function renderClip(
         ),
       ),
       // The heart at the center of the poster: 7×6 cells of 44px.
-      ...heartBoxes((SIZE - 7 * heartBlock) / 2, heartY, heartBlock),
+      ...heartBoxes((MASTER_SIZE - 7 * heartBlock) / 2, heartY, heartBlock),
       drawText(
         textFile("stats.txt", statsText),
         fitFontSize(statsText, 26, 15, INNER_W),
@@ -355,8 +366,8 @@ export async function renderClip(
     ];
 
     // Pass 1: the window's spectrogram as one still. 108 px per second
-    // of sound, so the pass-2 window (1080 wide) always holds exactly
-    // the last ten seconds.
+    // of sound, so the pass-2 window (the 1080 master width) always
+    // holds exactly the last ten seconds.
     const pxPerSec = 108;
     const picW = Math.max(pxPerSec, Math.round(pxPerSec * len));
     const pic = join(dir, "waterfall.png");
@@ -368,7 +379,7 @@ export async function renderClip(
       "-i",
       input,
       "-lavfi",
-      `showspectrumpic=s=${picW}x${SIZE}:mode=combined:color=intensity:scale=log:fscale=log:start=20:stop=16000:legend=0`,
+      `showspectrumpic=s=${picW}x${MASTER_SIZE}:mode=combined:color=intensity:scale=log:fscale=log:start=20:stop=16000:legend=0`,
       "-frames:v",
       "1",
       pic,
@@ -393,7 +404,7 @@ export async function renderClip(
       "-f",
       "lavfi",
       "-i",
-      `color=c=black:s=${SIZE}x${SIZE}`,
+      `color=c=black:s=${MASTER_SIZE}x${MASTER_SIZE}`,
       "-vf",
       overlays.join(","),
       "-frames:v",
@@ -413,14 +424,18 @@ export async function renderClip(
     // in from the right edge, which is where "now" lives. The palette
     // is crushed to luminance first, so the pink ramp is exact
     // whatever palette the spectrogram filter reached for. The card
-    // still is laid over the falls in a single overlay.
+    // still is laid over the falls in a single overlay. Only after
+    // that composite is complete does the export downscale run:
+    // Lanczos preserves the postcard's edges on the way to 720, and
+    // a subtle luma-only unsharp restores their bite without putting
+    // a colored halo around the pixel graphics.
     const filter = [
       // The falls get the poster's backing drawn on directly: the
       // translucent panel the words sit on, the tab's black chip, and
       // the tab's word on top of its chip.
-      `[1:v]pad=w=${picW + SIZE}:h=${SIZE}:x=${SIZE}:y=0:color=black,crop=w=${SIZE}:h=${SIZE}:x='${pxPerSec}*t':y=0,format=gray,format=rgb24,lutrgb=r='val':g='val*0.412':b='val*0.706',drawbox=x=${FX}:y=${FY}:w=${FW}:h=${FH}:color=black@0.60:t=fill,drawbox=x=${CHIP_X}:y=${FY - 17}:w=${CHIP_W}:h=34:color=black:t=fill,drawtext=fontfile=${FONT}:textfile=${tabFile}:expansion=none:fontsize=20:fontcolor=${WHITE}:x=${CHIP_X}+(${CHIP_W}-text_w)/2:y=${FY - 10}[falls]`,
+      `[1:v]pad=w=${picW + MASTER_SIZE}:h=${MASTER_SIZE}:x=${MASTER_SIZE}:y=0:color=black,crop=w=${MASTER_SIZE}:h=${MASTER_SIZE}:x='${pxPerSec}*t':y=0,format=gray,format=rgb24,lutrgb=r='val':g='val*0.412':b='val*0.706',drawbox=x=${FX}:y=${FY}:w=${FW}:h=${FH}:color=black@0.60:t=fill,drawbox=x=${CHIP_X}:y=${FY - 17}:w=${CHIP_W}:h=34:color=black:t=fill,drawtext=fontfile=${FONT}:textfile=${tabFile}:expansion=none:fontsize=20:fontcolor=${WHITE}:x=${CHIP_X}+(${CHIP_W}-text_w)/2:y=${FY - 10}[falls]`,
       `[2:v]colorkey=0x000000:0.08:0.05[cardk]`,
-      `[falls][cardk]overlay=0:0:format=rgb:repeatlast=1,format=yuv420p[vout]`,
+      `[falls][cardk]overlay=0:0:format=rgb:repeatlast=1,scale=${EXPORT_SIZE}:${EXPORT_SIZE}:flags=lanczos,unsharp=5:5:0.35:5:5:0.0,format=yuv420p[vout]`,
     ].join(";");
 
     const movieRes = await runFfmpeg([
@@ -470,8 +485,12 @@ export async function renderClip(
       // preset are frames nobody can see.
       "-preset",
       "superfast",
+      // Animation tuning suits this content — flat color fields and
+      // hard pixel edges — and keeps those edges clean at CRF 23.
+      "-tune",
+      "animation",
       "-crf",
-      "21",
+      String(EXPORT_CRF),
       "-c:a",
       "aac",
       "-b:a",

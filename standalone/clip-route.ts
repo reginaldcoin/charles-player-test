@@ -15,11 +15,14 @@
 // at boot and daily thereafter, and the next request re-cooks the song
 // fresh — a new first window, and the hearts and plays baked in are
 // the song's as they stand that day. A hearted song's clip is cheap to
-// re-render, and the volume is not an archive. Clips cooked before
-// this law, under window-named files, are adopted at boot: a song
-// with exactly one becomes that file, renamed; a song with several
-// keeps its smallest start; the rest stay sweepable under the same
-// 28-day rule.
+// re-render, and the volume is not an archive.
+//
+// Clip files carry the current export spec in their names. A file
+// cooked to an older spec — whether it wears a pre-law window name or
+// the song-named form from the 1080 export — is never adopted into or
+// served from the current cache. It stays on the volume only until
+// the same 28-day sweep removes it. Changing the export therefore
+// makes each song re-cook once, at the new spec, on its next request.
 //
 // Renders run through a small FIFO queue, at most two at once: a
 // shared-CPU box rendering waterfalls for everyone at once would fall
@@ -47,7 +50,12 @@ import { join } from "node:path";
 
 import { ARTIST, CATALOG } from "../client/src/catalog";
 import { songIndexFromSlug } from "../client/src/songSlug";
-import { CLIP_SEC, clipFileIsValid, renderClip } from "../server/clip";
+import {
+  CLIP_EXPORT_CACHE_TAG,
+  CLIP_SEC,
+  clipFileIsValid,
+  renderClip,
+} from "../server/clip";
 
 const CLIP_PATH_RE = /^\/clip\/([^/]+)\/?$/;
 const NEGATIVE_TTL_MS = 10 * 60 * 1000;
@@ -72,11 +80,24 @@ function parseLegacyClipName(
   return { slug, start: Number(m[2]) };
 }
 
-// True when a cache-dir name is a clip the sweep owns: a song's locked
-// clip (<slug>.mp4) or a legacy window clip not yet adopted.
+const CURRENT_CLIP_SUFFIX = `--${CLIP_EXPORT_CACHE_TAG}`;
+
+// The slug named by a current-spec clip file, or null when the name
+// is not one: <slug>--<export tag>.mp4.
+function parseCurrentClipName(name: string): string | null {
+  const ending = `${CURRENT_CLIP_SUFFIX}.mp4`;
+  if (!name.endsWith(ending) || name.includes(".rendering-")) return null;
+  const slug = name.slice(0, -ending.length);
+  return songIndexFromSlug(slug) >= 0 ? slug : null;
+}
+
+// True when a cache-dir name is a clip the sweep owns: a current-spec
+// locked clip, an older song-named clip, or a legacy window clip. The
+// older forms are sweepable even though they are never served.
 function isClipFile(name: string): boolean {
   if (!name.endsWith(".mp4") || name.includes(".rendering-")) return false;
   return (
+    parseCurrentClipName(name) !== null ||
     songIndexFromSlug(name.slice(0, -4)) >= 0 ||
     parseLegacyClipName(name) !== null
   );
@@ -94,45 +115,9 @@ export function createClipHandler(
   const cacheDir = join(dataDir, "clips");
   mkdirSync(cacheDir, { recursive: true });
 
-  // Adoption, once at boot: clips cooked before the one-clip law wear
-  // window names. A song holding legacy files and no locked clip
-  // adopts one — its smallest start — under the song's own name, so
-  // yesterday's cooking is not wasted. A rename keeps the file's age:
-  // the 28-day reset still comes for it on schedule. Songs that
-  // already own a locked clip keep it; their legacy files stay behind
-  // as sweepable extras.
-  function adoptLegacyClips() {
-    let adopted = 0;
-    try {
-      const bySong = new Map<string, { name: string; start: number }[]>();
-      for (const name of readdirSync(cacheDir)) {
-        const legacy = parseLegacyClipName(name);
-        if (!legacy) continue;
-        const arr = bySong.get(legacy.slug) ?? [];
-        arr.push({ name, start: legacy.start });
-        bySong.set(legacy.slug, arr);
-      }
-      for (const [slug, files] of bySong) {
-        const target = join(cacheDir, `${slug}.mp4`);
-        if (existsSync(target)) continue;
-        files.sort((a, b) => a.start - b.start);
-        try {
-          renameSync(join(cacheDir, files[0]!.name), target);
-          adopted++;
-        } catch {
-          // A file that vanished mid-adoption is not a failure.
-        }
-      }
-    } catch {
-      // No cache dir yet, nothing to adopt.
-    }
-    if (adopted > 0) {
-      console.log(
-        `[clips] adopted ${adopted} existing clip(s) as their songs' locked clips`,
-      );
-    }
-  }
-  adoptLegacyClips();
+  // No adoption: files cooked to an older export spec are bypassed,
+  // never renamed into the current cache. The sweep below owns them
+  // until their 28 days are up.
 
   // The age sweep: only this directory, only files wearing a clip's
   // name, plus render temps a dead process left behind (a temp older
@@ -234,17 +219,20 @@ export function createClipHandler(
     }
     const track = CATALOG[idx]!;
     const raw = Number(url.searchParams.get("t") ?? "0");
-    // The key is the song alone. ?t= is read only because a song with
-    // no locked clip and none in flight cooks from this request's
-    // window: round down to the 5-second mark first, clamp second.
-    // Once the render below is kicked (or the locked file is served),
-    // the window is locked and ?t= has spent its say.
+    // Within the current export spec, the key is the song alone.
+    // ?t= is read only because a song with no locked clip and none in
+    // flight cooks from this request's window: round down to the
+    // 5-second mark first, clamp second. Once the render below is
+    // kicked (or the locked file is served), the window is locked and
+    // ?t= has spent its say. The export tag in the key is what keeps
+    // an older encode — including the song-named 1080 file this route
+    // used to serve — from being mistaken for the current clip.
     let start = Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 0;
     start = Math.floor(start / 5) * 5;
     if (track.durationSec != null) {
       start = Math.min(start, Math.max(0, track.durationSec - CLIP_SEC));
     }
-    const key = slug;
+    const key = `${slug}${CURRENT_CLIP_SUFFIX}`;
     const file = join(cacheDir, `${key}.mp4`);
     if (existsSync(file)) {
       // Once per boot, a cached clip must prove it is whole before
