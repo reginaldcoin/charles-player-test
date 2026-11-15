@@ -334,6 +334,20 @@ async function reignsById(db: Db) {
   );
 }
 
+/** Listeners who have logged one continuous session of 60+ minutes —
+    the same event the session bonus keys on. The bonus firing itself is
+    only kept for the live session, so the historical record is derived
+    from plays: group by the client session id and sum eligible seconds
+    (the exact accumulation the bonus uses) against the same threshold. */
+async function hourglassIdSet(db: Db) {
+  const rows = await db
+    .select({ listenerId: schema.plays.listenerId })
+    .from(schema.plays)
+    .groupBy(schema.plays.listenerId, schema.plays.sessionId)
+    .having(sql`sum(${schema.plays.eligibleSec}) >= ${SESSION_BONUS_SEC}`);
+  return new Set(rows.map((r) => r.listenerId));
+}
+
 // ---------------------------------------------------------------------------
 // Shared response shapes
 // ---------------------------------------------------------------------------
@@ -345,6 +359,7 @@ const listenerPublic = z.object({
   bugHunter: z.boolean(),
   builder: z.boolean(),
   champ: z.boolean(),
+  hourglass: z.boolean(),
 });
 
 const claimResponse = z.object({
@@ -553,7 +568,7 @@ export const Actions = {
           ok: true,
           created: false,
           error: null,
-          listener: { id: found.id, name: found.name, code: found.code, bugHunter: found.bugHunter === 1, builder: found.builder === 1, champ: (((await reignsById(db)).get(found.id)?.reigns ?? 0) >= 1) },
+          listener: { id: found.id, name: found.name, code: found.code, bugHunter: found.bugHunter === 1, builder: found.builder === 1, champ: (((await reignsById(db)).get(found.id)?.reigns ?? 0) >= 1), hourglass: (await hourglassIdSet(db)).has(found.id) },
           token,
         };
       }
@@ -583,7 +598,7 @@ export const Actions = {
         ok: true,
         created: true,
         error: null,
-        listener: { id: row.id, name, code, bugHunter: false, builder: false, champ: false },
+        listener: { id: row.id, name, code, bugHunter: false, builder: false, champ: false, hourglass: false },
         token,
       };
     },
@@ -955,6 +970,7 @@ export const Actions = {
           bugHunter: z.boolean(),
           builder: z.boolean(),
           champ: z.boolean(),
+          hourglass: z.boolean(),
           score: z.number(),
           minutes: z.number(),
           depth: z.number(),
@@ -1070,6 +1086,8 @@ export const Actions = {
         Date.now(),
       );
 
+      const hourglassIds = await hourglassIdSet(db);
+
       return {
         listeners: rows.map((r, i) => ({
           rank: i + 1,
@@ -1079,6 +1097,7 @@ export const Actions = {
           bugHunter: r.bugHunter,
           builder: r.builder,
           champ: (reigns.get(r.id)?.reigns ?? 0) >= 1,
+          hourglass: hourglassIds.has(r.id),
           score: r.score,
           minutes: r.minutes,
           depth: r.depth,
@@ -1401,7 +1420,7 @@ export const Actions = {
       return {
         ok: true,
         error: null,
-        listener: { id: listener.id, name: listener.name, code: listener.code, bugHunter: listener.bugHunter === 1, builder: listener.builder === 1, champ: (((await reignsById(db)).get(listener.id)?.reigns ?? 0) >= 1) },
+        listener: { id: listener.id, name: listener.name, code: listener.code, bugHunter: listener.bugHunter === 1, builder: listener.builder === 1, champ: (((await reignsById(db)).get(listener.id)?.reigns ?? 0) >= 1), hourglass: (await hourglassIdSet(db)).has(listener.id) },
         rank,
         score: round2(state.score),
         minutes: Math.floor(agg.creditedSec / 60),

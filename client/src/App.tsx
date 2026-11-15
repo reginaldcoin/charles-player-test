@@ -146,6 +146,35 @@ function ChampGlyph() {
   );
 }
 
+/** Hourglass flair: a little pixel hourglass, worn by every listener who
+    has logged one continuous session of 60+ minutes. Derived from the
+    session record, never granted. */
+function HourglassGlyph() {
+  const glass = "#c084fc";
+  const sand = "#fde047";
+  return (
+    <span title="Hourglass" className="ml-1 inline-flex align-[-2px]">
+      <svg viewBox="0 0 10 10" shapeRendering="crispEdges" aria-hidden className="h-[13px] w-[13px]">
+        <rect x="2" y="1" width="6" height="1" fill={glass} />
+        <rect x="2" y="8" width="6" height="1" fill={glass} />
+        <rect x="2" y="2" width="1" height="2" fill={glass} />
+        <rect x="7" y="2" width="1" height="2" fill={glass} />
+        <rect x="3" y="4" width="1" height="1" fill={glass} />
+        <rect x="6" y="4" width="1" height="1" fill={glass} />
+        <rect x="3" y="5" width="1" height="1" fill={glass} />
+        <rect x="6" y="5" width="1" height="1" fill={glass} />
+        <rect x="2" y="6" width="1" height="2" fill={glass} />
+        <rect x="7" y="6" width="1" height="2" fill={glass} />
+        <rect x="3" y="2" width="4" height="1" fill={sand} />
+        <rect x="4" y="3" width="2" height="1" fill={sand} />
+        <rect x="4" y="4" width="1" height="2" fill={sand} />
+        <rect x="4" y="6" width="2" height="1" fill={sand} />
+        <rect x="3" y="7" width="4" height="1" fill={sand} />
+      </svg>
+    </span>
+  );
+}
+
 /** Trailing 24 hours of points as 24 tiny pixel bars, oldest first.
     The chart is a data display, so it rides in the shared mini frame
     (.bar-frame) rather than sitting naked on the row or the poster. */
@@ -473,6 +502,7 @@ interface Identity {
   bugHunter?: boolean;
   builder?: boolean;
   champ?: boolean;
+  hourglass?: boolean;
   token: string;
 }
 
@@ -2493,6 +2523,7 @@ export function App() {
                   {identity.bugHunter && <BugGlyph />}
                   {identity.builder && <HammerGlyph />}
                   {identity.champ && <ChampGlyph />}
+                  {identity.hourglass && <HourglassGlyph />}
                 </span>{" "}
                 —{" "}
                 {sessionStale ? (
@@ -2772,6 +2803,7 @@ function Standings({
                   {top.bugHunter && <BugGlyph />}
                   {top.builder && <HammerGlyph />}
                   {top.champ && <ChampGlyph />}
+                  {top.hourglass && <HourglassGlyph />}
                   <PresenceDot lastActiveMs={top.lastActiveMs} />
                 </p>
                 <p className="font-pixel mt-3 text-[54px] leading-[1.2] text-[var(--accent)]">
@@ -2826,6 +2858,7 @@ function Standings({
                       {l.bugHunter && <BugGlyph />}
                       {l.builder && <HammerGlyph />}
                       {l.champ && <ChampGlyph />}
+                      {l.hourglass && <HourglassGlyph />}
                       <PresenceDot lastActiveMs={l.lastActiveMs} />
                     </span>
                     <span className="font-data block text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
@@ -3349,6 +3382,7 @@ function ClaimPanel({
           bugHunter: res.listener.bugHunter,
           builder: res.listener.builder,
           champ: res.listener.champ,
+          hourglass: res.listener.hourglass,
           token: res.token,
         });
       } else {
@@ -3555,6 +3589,7 @@ function MyRoad({
             {(data.listener?.bugHunter ?? identity.bugHunter) && <BugGlyph />}
             {(data.listener?.builder ?? identity.builder) && <HammerGlyph />}
             {(data.listener?.champ ?? identity.champ) && <ChampGlyph />}
+            {(data.listener?.hourglass ?? identity.hourglass) && <HourglassGlyph />}
           </p>
           <p className="font-data mt-1 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
             {fmtPts2(data.score)} points · {data.minutes} minutes · {data.finishes}{" "}
