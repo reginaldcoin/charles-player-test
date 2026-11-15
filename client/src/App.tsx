@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -2489,6 +2490,13 @@ export function App() {
               screen off.
             </p>
           </div>
+
+          <CatalogSearch
+            identity={identity}
+            sessionStale={sessionStale}
+            onClaim={() => setView("road")}
+            onPlayTrack={playRecent}
+          />
         </section>
 
         {/* =========================== STANDINGS =========================== */}
@@ -2937,6 +2945,166 @@ function MostLoved({
           </ol>
         </>
       )}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// SEARCH — find any song in the catalog by title or project and play it.
+// A function of the player, not a view of its own: it lives at the foot of
+// the player section and starts tracks through the same onPlayTrack path
+// the Recent Plays and Most Loved rows use. Title matches rank above
+// project-only matches; catalog order holds inside each rank.
+//
+// Search sits behind the identity wall, gated the way the app gates its
+// other signed-in surfaces: the signed-in test is the same one MY ROAD
+// uses (identity && !sessionStale), and a guest or a stale session meets
+// the panel with the sign-in path in it — the same road the guest strip
+// above points down — instead of a working input.
+// ---------------------------------------------------------------------------
+
+const SEARCH_RESULT_CAP = 60;
+
+function CatalogSearch({
+  identity,
+  sessionStale,
+  onClaim,
+  onPlayTrack,
+}: {
+  identity: Identity | null;
+  sessionStale: boolean;
+  onClaim: () => void;
+  onPlayTrack: (trackTitle: string, project: string) => void;
+}) {
+  const signedIn = !!identity && !sessionStale;
+  const [query, setQuery] = useState("");
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const searching = terms.length > 0;
+
+  const { results, total } = useMemo(() => {
+    if (!searching) return { results: [] as CatalogTrack[], total: 0 };
+    const titleHits: CatalogTrack[] = [];
+    const projectHits: CatalogTrack[] = [];
+    for (const t of CATALOG) {
+      const title = t.title.toLowerCase();
+      const project = t.project.toLowerCase();
+      if (!terms.every((term) => title.includes(term) || project.includes(term)))
+        continue;
+      if (terms.every((term) => title.includes(term))) titleHits.push(t);
+      else projectHits.push(t);
+    }
+    const all = [...titleHits, ...projectHits];
+    return { results: all.slice(0, SEARCH_RESULT_CAP), total: all.length };
+  }, [query]);
+
+  const projectCount = useMemo(
+    () => new Set(CATALOG.map((t) => t.project)).size,
+    [],
+  );
+
+  const play = (t: CatalogTrack) => {
+    onPlayTrack(t.title, t.project);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  return (
+    <section aria-label="Search the catalog" className="px-4 pb-6">
+      <div className="nes-container with-title px-4 py-3">
+        <h3 className="title column-title font-pixel text-[11px]">SEARCH</h3>
+        {signedIn ? (
+          <>
+            <p className="font-data text-[11px] uppercase leading-relaxed tracking-[0.12em] text-[var(--dim)]">
+              {CATALOG.length.toLocaleString()} songs · {projectCount}{" "}
+              projects. Type a title or a project name.
+            </p>
+            <div className="mt-3 flex items-stretch gap-2">
+              <input
+                id="catalog-search"
+                type="search"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") setQuery("");
+                }}
+                placeholder="Search the catalog…"
+                aria-label="Search the catalog by song title or project name"
+                className="nes-input is-dark min-w-0 flex-1 text-[16px]"
+              />
+              {searching && (
+                <button
+                  type="button"
+                  onClick={() => setQuery("")}
+                  className="nes-btn is-purple shrink-0 px-3"
+                  aria-label="Clear the search"
+                >
+                  <span className="font-pixel text-[11px]">CLEAR</span>
+                </button>
+              )}
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="font-data text-[11px] uppercase leading-relaxed tracking-[0.12em] text-[var(--dim)]">
+              {CATALOG.length.toLocaleString()} songs · {projectCount}{" "}
+              projects. Search is for named listeners.
+            </p>
+            <button
+              type="button"
+              onClick={onClaim}
+              className="font-data mt-3 text-left text-[11px] uppercase tracking-[0.12em] underline underline-offset-4"
+            >
+              {identity
+                ? "Session's out — sign back in to search →"
+                : "Claim a name to search the catalog →"}
+            </button>
+          </>
+        )}
+      </div>
+
+      {signedIn &&
+        searching &&
+        (total === 0 ? (
+          <p className="px-4 py-8 text-base leading-relaxed">
+            Nothing in the catalog matches &ldquo;{query.trim()}&rdquo;. Try a
+            shorter piece of the title, or the project it lives on.
+          </p>
+        ) : (
+          <>
+            <p className="font-data px-4 pt-4 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+              {total} {total === 1 ? "song" : "songs"}
+              {total > SEARCH_RESULT_CAP &&
+                ` — first ${SEARCH_RESULT_CAP} shown, keep typing to narrow it`}
+            </p>
+            <ol className="mt-2">
+              {results.map((t) => (
+                <li
+                  key={`${t.title}${t.project}${t.src}`}
+                  className="border-b border-[var(--border)] px-4 py-3"
+                >
+                  <button
+                    type="button"
+                    onClick={() => play(t)}
+                    className="flex w-full items-center gap-4 text-left"
+                    aria-label={`Play ${t.title}`}
+                  >
+                    <span className="min-w-0 flex-1">
+                      <span className="block break-words text-[16px] font-medium leading-snug">
+                        {t.title}
+                      </span>
+                      <span className="font-data block text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+                        {t.project}
+                        {t.durationSec ? ` · ${fmtTime(t.durationSec)}` : ""}
+                      </span>
+                    </span>
+                    <span className="font-pixel shrink-0 text-[16px] text-[var(--accent)]">
+                      ▶
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ol>
+          </>
+        ))}
     </section>
   );
 }
