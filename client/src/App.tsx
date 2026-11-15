@@ -104,10 +104,13 @@ function BugGlyph() {
   );
 }
 
-/** Trailing 24 hours of points as 24 tiny pixel bars, oldest first. */
+/** Trailing 24 hours of points as 24 tiny pixel bars, oldest first.
+    The chart is a data display, so it rides in the shared mini frame
+    (.bar-frame) rather than sitting naked on the row or the poster. */
 function DayBars({ bars }: { bars: number[] }) {
   const max = Math.max(0, ...bars);
   return (
+    <span className="bar-frame">
     <svg
       viewBox="0 0 48 16"
       shapeRendering="crispEdges"
@@ -137,6 +140,7 @@ function DayBars({ bars }: { bars: number[] }) {
         ),
       )}
     </svg>
+    </span>
   );
 }
 
@@ -2179,7 +2183,7 @@ export function App() {
                 to the panel, so at phone width the text wraps and the
                 score numerals shrink inside the box instead of crowding
                 or clipping at the panel's right edge. */}
-            <div className="chrome pointer-events-none absolute left-3 right-3 top-3 overflow-hidden text-right">
+            <div className="chrome pointer-events-none absolute left-3 right-3 top-3 overflow-hidden border-2 border-[var(--border)] bg-[var(--bg)]/70 px-3 py-2 text-right">
               <p className="font-data text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
                 Session
               </p>
@@ -2219,8 +2223,11 @@ export function App() {
             )}
           </div>
 
-          {/* Now playing — the title is the one break: it runs poster-wide */}
-          <div className="border-b border-[var(--border)] px-4 pb-4 pt-4">
+          {/* Now playing — framed like the site's other sections;
+              inside the frame the title is still the one break: it
+              runs poster-wide */}
+          <div className="px-4 pt-4">
+            <div className="nes-container px-4 pb-4 pt-4">
             <p className="font-data text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
               {nowTrack ? `Now playing · ${nowTrack.project}` : "Now playing"}
             </p>
@@ -2262,7 +2269,7 @@ export function App() {
             </div>
             {/* Progress: a hard-edged block bar, no knob */}
             <div
-              className="mt-4 h-[12px] w-full border border-[var(--border)]"
+              className="meter mt-4 h-[12px] w-full"
               role="progressbar"
               aria-label="Track progress"
               aria-valuemin={0}
@@ -2312,6 +2319,7 @@ export function App() {
                 {lastAward}
               </p>
             )}
+            </div>
           </div>
 
           {/* Transport — the site's button family: yellow, purple, pink, green */}
@@ -3129,6 +3137,7 @@ function ClaimPanel({
 
   return (
     <section aria-label="Claim your name" className="px-4 py-6">
+      <div className="nes-container px-4 py-4">
       <h2 className="column-title font-pixel text-[24px] leading-relaxed">
         {welcomeBackName ? "SIGN BACK IN" : "YOUR NAME"}
       </h2>
@@ -3220,6 +3229,7 @@ function ClaimPanel({
             : "New name? This claims it. Already yours? The same password signs you back in — and signs out every other device."}
         </p>
       </form>
+      </div>
     </section>
   );
 }
@@ -3339,7 +3349,8 @@ function MyRoad({
       </div>
 
       {/* Today under the cap */}
-      <div className="mt-4 border-b border-[var(--border)] px-4 py-4">
+      <div className="px-4 pt-4">
+        <div className="nes-container px-4 py-4">
         <div className="flex items-baseline justify-between">
           <p className="font-data text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
             Today, scored time
@@ -3348,7 +3359,7 @@ function MyRoad({
             {fmtTime(data.todayEligibleSec)} / {fmtTime(data.dayCapSec)}
           </p>
         </div>
-        <div className="mt-2 h-[12px] w-full border border-[var(--border)]">
+        <div className="meter mt-2 h-[12px] w-full">
           <div
             className="h-full bg-[var(--text)]"
             style={{ width: `${capPct}%` }}
@@ -3364,10 +3375,12 @@ function MyRoad({
           ever · {data.streak.freezesUsed} freeze
           {data.streak.freezesUsed === 1 ? "" : "s"} used
         </p>
+        </div>
       </div>
 
       {/* Milestones */}
-      <div className="border-b-2 border-[var(--border)]">
+      <div className="px-4 pt-4">
+        <div className="nes-container px-4 py-2">
         {data.milestones.map((m) => {
           const pct =
             m.target > 0 ? Math.min(100, (m.current / m.target) * 100) : 0;
@@ -3378,7 +3391,7 @@ function MyRoad({
           return (
             <div
               key={m.label}
-              className="border-b border-[var(--border)] px-4 py-3 last:border-b-0"
+              className="border-b border-[var(--border)] py-3 last:border-b-0"
             >
               <div className="flex items-baseline justify-between gap-3">
                 <p className="font-data text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
@@ -3388,7 +3401,7 @@ function MyRoad({
                   {shown}
                 </p>
               </div>
-              <div className="mt-2 h-[8px] w-full border border-[var(--border)]">
+              <div className="meter mt-2 h-[8px] w-full">
                 <div
                   className="h-full bg-[var(--text)]"
                   style={{ width: `${pct}%` }}
@@ -3397,10 +3410,12 @@ function MyRoad({
             </div>
           );
         })}
+        </div>
       </div>
 
       {/* Recent plays */}
-      <div className="px-4 py-4">
+      <div className="px-4 pt-4">
+        <div className="nes-container px-4 py-4">
         <h3 className="column-title font-pixel text-[20px] leading-relaxed">
           RECENT PLAYS
         </h3>
@@ -3476,8 +3491,12 @@ function MyRoad({
             ))}
           </ul>
         )}
-        {/* Your hearts — the shelf of hearted songs, playable in place */}
-        <h3 className="column-title font-pixel mt-8 text-[20px] leading-relaxed">
+        </div>
+      </div>
+      {/* Your hearts — the shelf of hearted songs, playable in place */}
+      <div className="px-4 pt-4">
+        <div className="nes-container px-4 py-4">
+        <h3 className="column-title font-pixel text-[20px] leading-relaxed">
           YOUR HEARTS
         </h3>
         {data.favorites.length === 0 ? (
@@ -3538,6 +3557,9 @@ function MyRoad({
             ))}
           </ul>
         )}
+        </div>
+      </div>
+      <div className="px-4">
         <button
           type="button"
           onClick={onSignOut}
@@ -3799,12 +3821,14 @@ function BackRoom({ identity }: { identity: Identity }) {
   if (!data.allowed) {
     return (
       <section aria-label="The admin panel: track board" className="px-4 py-10">
+        <div className="nes-container px-4 py-4">
         <h2 className="column-title font-pixel text-[24px] leading-relaxed">
           ADMIN PANEL
         </h2>
         <p className="mt-3 text-base leading-relaxed">
           The admin panel is for the operators.
         </p>
+        </div>
       </section>
     );
   }
@@ -3896,7 +3920,7 @@ function BackRoom({ identity }: { identity: Identity }) {
                   </span>
                 </div>
                 {t.rank !== null && (
-                  <div className="ml-[60px] mt-2 h-[8px] border border-[var(--border)]">
+                  <div className="meter ml-[60px] mt-2 h-[8px]">
                     <div
                       className="h-full bg-[var(--text)]"
                       style={{ width: `${t.pct}%` }}
