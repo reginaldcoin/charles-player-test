@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type ReactNode,
 } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { SafeAreaTopScrim } from "@hatch/space-sdk/client";
@@ -2672,6 +2673,158 @@ export function App() {
   );
 }
 
+
+// ---------------------------------------------------------------------------
+// BOARD WINDOW — a full board behind one button: an in-player overlay
+// panel, not a page. The face stays short; the window carries the whole
+// record. Escape or CLOSE puts it away; the page behind it never scrolls
+// while it is open.
+// ---------------------------------------------------------------------------
+
+function BoardWindow({
+  title,
+  onClose,
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prev;
+    };
+  }, [onClose]);
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+      className="fixed inset-0 z-40 overflow-y-auto bg-[var(--bg)]"
+    >
+      <div className="sticky top-0 z-10 flex items-center justify-between gap-4 border-b-4 border-[var(--border)] bg-[var(--bg)] px-4 py-3">
+        <p className="font-pixel text-[13px]">{title}</p>
+        <button
+          type="button"
+          onClick={onClose}
+          className="nes-btn is-pink font-pixel px-4 py-2 text-[12px]"
+        >
+          CLOSE
+        </button>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+// One standings row, the same on the face and in the all-listeners window:
+// rank, name with its marks, minutes and champ time, the day's bars, score.
+function ListenerRow({
+  listener: l,
+  identity,
+}: {
+  listener: BoardData["listeners"][number];
+  identity: Identity | null;
+}) {
+  const mine = identity?.id === l.id;
+  return (
+    <li className="flex items-baseline gap-4 border-b border-[var(--border)] px-4 py-3">
+      <span className="font-pixel w-[44px] shrink-0 text-[20px]">
+        {l.rank}
+      </span>
+      <span
+        aria-hidden
+        className={`h-[16px] w-[8px] shrink-0 self-center ${
+          mine ? "bg-[var(--accent)]" : "bg-transparent"
+        }`}
+      />
+      <span className="min-w-0 flex-1">
+        <span className="block break-words text-[16px] font-medium leading-snug">
+          {l.name}{" "}
+          <span className="font-data text-[11px] text-[var(--dim)]">
+            <TripCode code={l.code} />
+          </span>
+          {l.bugHunter && <BugGlyph />}
+          {l.builder && <HammerGlyph />}
+          {l.champ && <ChampGlyph />}
+          {l.hourglass && <HourglassGlyph />}
+          <PresenceDot lastActiveMs={l.lastActiveMs} />
+        </span>
+        <span className="font-data block text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+          {l.minutes} min
+          {l.champMs > 0 && <> · {fmtReign(l.champMs)} as champ</>}
+          {l.streakDays >= 2 && <> · {l.streakDays} day streak</>}
+        </span>
+        <span className="mt-1 block">
+          <DayBars bars={l.dayBars} />
+        </span>
+      </span>
+      <span className="font-pixel shrink-0 text-[20px]">
+        {fmtPts1(l.score)}
+      </span>
+    </li>
+  );
+}
+
+// One Most Loved row, the same on the face and in the 2+ window: rank,
+// title, project, hearts. A row in the catalog plays; one that is not
+// (a hearted title the catalog no longer carries) just reads.
+function LovedRow({
+  track: t,
+  onPlayTrack,
+}: {
+  track: LoveBoardData["tracks"][number];
+  onPlayTrack: (trackTitle: string, project: string) => void;
+}) {
+  const playable = CATALOG.some(
+    (x) => x.title === t.title && x.project === t.project,
+  );
+  const body = (
+    <>
+      <span className="font-pixel w-[44px] shrink-0 text-[20px]">
+        {t.rank}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block break-words text-[16px] font-medium leading-snug">
+          {t.title}
+        </span>
+        <span className="font-data block text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+          {t.project}
+          {t.durationSec > 0 && ` · ${fmtTime(t.durationSec)}`}
+        </span>
+      </span>
+      <span className="flex shrink-0 items-center gap-2">
+        <HeartIcon size={18} />
+        <span className="font-pixel text-[18px]">{t.hearts}</span>
+      </span>
+    </>
+  );
+  return (
+    <li className="border-b border-[var(--border)] px-4 py-3">
+      {playable ? (
+        <button
+          type="button"
+          onClick={() => onPlayTrack(t.title, t.project)}
+          className="flex w-full items-center gap-4 text-left"
+          aria-label={`Play ${t.title}`}
+        >
+          {body}
+        </button>
+      ) : (
+        <div className="flex items-center gap-4">{body}</div>
+      )}
+    </li>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // STANDINGS — the brag board. #1 crowned at poster scale; the giant rank
 // numeral is this view's one deliberate grid break.
@@ -2696,6 +2849,7 @@ function Standings({
     queryFn: () => api.getLoveBoard({}),
     refetchInterval: 30000,
   });
+  const [showAll, setShowAll] = useState(false);
 
   if (board.isPending) {
     return (
@@ -2833,56 +2987,41 @@ function Standings({
           )}
 
           <ol className="mt-4">
-            {rest.map((l) => {
-              const mine = identity?.id === l.id;
-              return (
-                <li
-                  key={l.id}
-                  className="flex items-baseline gap-4 border-b border-[var(--border)] px-4 py-3"
-                >
-                  <span className="font-pixel w-[44px] shrink-0 text-[20px]">
-                    {l.rank}
-                  </span>
-                  <span
-                    aria-hidden
-                    className={`h-[16px] w-[8px] shrink-0 self-center ${
-                      mine ? "bg-[var(--accent)]" : "bg-transparent"
-                    }`}
-                  />
-                  <span className="min-w-0 flex-1">
-                    <span className="block break-words text-[16px] font-medium leading-snug">
-                      {l.name}{" "}
-                      <span className="font-data text-[11px] text-[var(--dim)]">
-                        <TripCode code={l.code} />
-                      </span>
-                      {l.bugHunter && <BugGlyph />}
-                      {l.builder && <HammerGlyph />}
-                      {l.champ && <ChampGlyph />}
-                      {l.hourglass && <HourglassGlyph />}
-                      <PresenceDot lastActiveMs={l.lastActiveMs} />
-                    </span>
-                    <span className="font-data block text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
-                      {l.minutes} min
-                      {l.champMs > 0 && <> · {fmtReign(l.champMs)} as champ</>}
-                      {l.streakDays >= 2 && <> · {l.streakDays} day streak</>}
-                    </span>
-                    <span className="mt-1 block">
-                      <DayBars bars={l.dayBars} />
-                    </span>
-                  </span>
-                  <span className="font-pixel shrink-0 text-[20px]">
-                    {fmtPts1(l.score)}
-                  </span>
-                </li>
-              );
-            })}
+            {rest.slice(0, 9).map((l) => (
+              <ListenerRow key={l.id} listener={l} identity={identity} />
+            ))}
           </ol>
+
+          {data.listeners.length > 10 && (
+            <div className="px-4 pt-4">
+              <button
+                type="button"
+                onClick={() => setShowAll(true)}
+                className="nes-btn font-pixel w-full px-5 py-4 text-[14px]"
+              >
+                ALL LISTENERS
+              </button>
+            </div>
+          )}
 
           <p className="font-data px-4 py-4 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
             {data.totals.listeners} listeners · {data.totals.plays} plays ·{" "}
             {data.totals.minutes} minutes,
             all time
           </p>
+
+          {showAll && (
+            <BoardWindow
+              title="ALL LISTENERS"
+              onClose={() => setShowAll(false)}
+            >
+              <ol>
+                {data.listeners.map((l) => (
+                  <ListenerRow key={l.id} listener={l} identity={identity} />
+                ))}
+              </ol>
+            </BoardWindow>
+          )}
         </>
       )}
 
@@ -2900,8 +3039,17 @@ function MostLoved({
   data: LoveBoardData;
   onPlayTrack: (trackTitle: string, project: string) => void;
 }) {
-  const top = data.tracks[0];
-  const rest = data.tracks.slice(1);
+  const [showAll, setShowAll] = useState(false);
+  // The face is the peak tier only: the songs at the payload's real
+  // maximum heart count, read at runtime — never a fixed number. A peak
+  // under two hearts is no peak at all: the face shows nothing rather
+  // than everything, and one-heart songs live on neither surface.
+  const maxHearts = data.tracks.reduce((m, t) => Math.max(m, t.hearts), 0);
+  const peak =
+    maxHearts >= 2 ? data.tracks.filter((t) => t.hearts === maxHearts) : [];
+  const loved = data.tracks.filter((t) => t.hearts >= 2);
+  const top = peak[0];
+  const rest = peak.slice(1);
   const canPlay = (title: string, project: string) =>
     CATALOG.some((t) => t.title === title && t.project === project);
 
@@ -2971,49 +3119,46 @@ function MostLoved({
           )}
 
           <ol className="mt-4">
-            {rest.map((t) => {
-              const playable = canPlay(t.title, t.project);
-              const body = (
-                <>
-                  <span className="font-pixel w-[44px] shrink-0 text-[20px]">
-                    {t.rank}
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block break-words text-[16px] font-medium leading-snug">
-                      {t.title}
-                    </span>
-                    <span className="font-data block text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
-                      {t.project}
-                      {t.durationSec > 0 && ` · ${fmtTime(t.durationSec)}`}
-                    </span>
-                  </span>
-                  <span className="flex shrink-0 items-center gap-2">
-                    <HeartIcon size={18} />
-                    <span className="font-pixel text-[18px]">{t.hearts}</span>
-                  </span>
-                </>
-              );
-              return (
-                <li
-                  key={`${t.title}\u001f${t.project}`}
-                  className="border-b border-[var(--border)] px-4 py-3"
-                >
-                  {playable ? (
-                    <button
-                      type="button"
-                      onClick={() => onPlayTrack(t.title, t.project)}
-                      className="flex w-full items-center gap-4 text-left"
-                      aria-label={`Play ${t.title}`}
-                    >
-                      {body}
-                    </button>
-                  ) : (
-                    <div className="flex items-center gap-4">{body}</div>
-                  )}
-                </li>
-              );
-            })}
+            {rest.map((t) => (
+              <LovedRow
+                key={`${t.title}\u001f${t.project}`}
+                track={t}
+                onPlayTrack={onPlayTrack}
+              />
+            ))}
           </ol>
+
+          {loved.length > peak.length && (
+            <div className="px-4 pt-4">
+              <button
+                type="button"
+                onClick={() => setShowAll(true)}
+                className="nes-btn font-pixel w-full px-5 py-4 text-[14px]"
+              >
+                ALL WITH 2+ HEARTS
+              </button>
+            </div>
+          )}
+
+          {showAll && (
+            <BoardWindow
+              title="MOST LOVED · 2+ HEARTS"
+              onClose={() => setShowAll(false)}
+            >
+              <ol>
+                {loved.map((t) => (
+                  <LovedRow
+                    key={`${t.title}\u001f${t.project}`}
+                    track={t}
+                    onPlayTrack={(title, project) => {
+                      setShowAll(false);
+                      onPlayTrack(title, project);
+                    }}
+                  />
+                ))}
+              </ol>
+            </BoardWindow>
+          )}
         </>
       )}
     </section>
