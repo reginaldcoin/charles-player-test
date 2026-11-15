@@ -24,6 +24,9 @@ export const listeners = sqliteTable("listeners", {
   code: text("code").notNull(),
   // Bug-hunter flair: 1 when the operators have granted the pixel bug.
   bugHunter: integer("bug_hunter").notNull().default(0),
+  // Builder flair: 1 when the operators have granted the pixel hammer
+  // (earned by suggesting a site update that actually shipped).
+  builder: integer("builder").notNull().default(0),
   pwHash: text("pw_hash").notNull(),
   pwAlgo: text("pw_algo").notNull(),
   createdAt: integer("created_at", { mode: "timestamp_ms" })

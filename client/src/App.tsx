@@ -104,6 +104,29 @@ function BugGlyph() {
   );
 }
 
+/** Builder flair: a little pixel hammer, granted by the operators to
+    listeners whose suggested site update actually shipped. */
+function HammerGlyph() {
+  const amber = "#fbbf24";
+  const face = "#d97706";
+  const wood = "#b45309";
+  const grip = "#92400e";
+  return (
+    <span title="Builder" className="ml-1 inline-flex align-[-2px]">
+      <svg viewBox="0 0 10 10" shapeRendering="crispEdges" aria-hidden className="h-[13px] w-[13px]">
+        <rect x="2" y="2" width="1" height="1" fill={amber} />
+        <rect x="3" y="1" width="6" height="3" fill={amber} />
+        <rect x="8" y="1" width="1" height="3" fill={face} />
+        <rect x="5" y="4" width="2" height="1" fill={wood} />
+        <rect x="4" y="5" width="2" height="1" fill={wood} />
+        <rect x="3" y="6" width="2" height="1" fill={wood} />
+        <rect x="2" y="7" width="2" height="1" fill={wood} />
+        <rect x="1" y="8" width="2" height="1" fill={grip} />
+      </svg>
+    </span>
+  );
+}
+
 /** Trailing 24 hours of points as 24 tiny pixel bars, oldest first.
     The chart is a data display, so it rides in the shared mini frame
     (.bar-frame) rather than sitting naked on the row or the poster. */
@@ -429,6 +452,7 @@ interface Identity {
   name: string;
   code: string;
   bugHunter?: boolean;
+  builder?: boolean;
   token: string;
 }
 
@@ -2447,6 +2471,7 @@ export function App() {
                 <span className="text-[var(--text)]">
                   {identity.name} <TripCode code={identity.code} />
                   {identity.bugHunter && <BugGlyph />}
+                  {identity.builder && <HammerGlyph />}
                 </span>{" "}
                 —{" "}
                 {sessionStale ? (
@@ -2724,6 +2749,7 @@ function Standings({
                     <TripCode code={top.code} />
                   </span>
                   {top.bugHunter && <BugGlyph />}
+                  {top.builder && <HammerGlyph />}
                   <PresenceDot lastActiveMs={top.lastActiveMs} />
                 </p>
                 <p className="font-pixel mt-3 text-[54px] leading-[1.2] text-[var(--accent)]">
@@ -2776,6 +2802,7 @@ function Standings({
                         <TripCode code={l.code} />
                       </span>
                       {l.bugHunter && <BugGlyph />}
+                      {l.builder && <HammerGlyph />}
                       <PresenceDot lastActiveMs={l.lastActiveMs} />
                     </span>
                     <span className="font-data block text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
@@ -3297,6 +3324,7 @@ function ClaimPanel({
           name: res.listener.name,
           code: res.listener.code,
           bugHunter: res.listener.bugHunter,
+          builder: res.listener.builder,
           token: res.token,
         });
       } else {
@@ -3501,6 +3529,7 @@ function MyRoad({
               <TripCode code={identity.code} />
             </span>
             {(data.listener?.bugHunter ?? identity.bugHunter) && <BugGlyph />}
+            {(data.listener?.builder ?? identity.builder) && <HammerGlyph />}
           </p>
           <p className="font-data mt-1 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
             {fmtPts2(data.score)} points · {data.minutes} minutes · {data.finishes}{" "}
@@ -3755,12 +3784,20 @@ function OperatorTools({ identity }: { identity: Identity }) {
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(
     null,
   );
+  const [builderCode, setBuilderCode] = useState("");
+  const [builderGrant, setBuilderGrant] = useState(true);
+  const [builderResult, setBuilderResult] = useState<{
+    ok: boolean;
+    text: string;
+  } | null>(null);
   const board = useQuery({
     queryKey: ["board"],
     queryFn: () => api.getBoard({}),
   });
   const hunters =
     board.data?.listeners.filter((listener) => listener.bugHunter) ?? [];
+  const builders =
+    board.data?.listeners.filter((listener) => listener.builder) ?? [];
 
   const setBug = useMutation({
     mutationFn: () =>
@@ -3784,6 +3821,37 @@ function OperatorTools({ identity }: { identity: Identity }) {
     },
     onError: () =>
       setResult({
+        ok: false,
+        text: "The board won't answer right now. Try again.",
+      }),
+  });
+
+  const setHammer = useMutation({
+    mutationFn: () =>
+      api.setBuilder({
+        token: identity.token,
+        code: builderCode.trim(),
+        on: builderGrant,
+      }),
+    onSuccess: (res) => {
+      if (res.ok && res.listener) {
+        setBuilderResult({
+          ok: true,
+          text: builderGrant
+            ? `${res.listener} carries the hammer now.`
+            : `${res.listener}'s hammer is off.`,
+        });
+        void queryClient.invalidateQueries({ queryKey: ["board"] });
+        void queryClient.invalidateQueries({ queryKey: ["trackboard"] });
+      } else {
+        setBuilderResult({
+          ok: false,
+          text: res.error ?? "That didn't work. Try again.",
+        });
+      }
+    },
+    onError: () =>
+      setBuilderResult({
         ok: false,
         text: "The board won't answer right now. Try again.",
       }),
@@ -3900,6 +3968,115 @@ function OperatorTools({ identity }: { identity: Identity }) {
               }`}
             >
               {result.text}
+            </p>
+          )}
+        </form>
+
+        <p className="font-data mt-8 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+          Builders
+        </p>
+        {board.isPending ? (
+          <p className="font-data mt-2 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+            Reading the board…
+          </p>
+        ) : board.error || !board.data ? (
+          <p className="mt-2 text-base leading-relaxed">
+            The board won't read right now.
+          </p>
+        ) : builders.length === 0 ? (
+          <p className="mt-2 text-base leading-relaxed">
+            No hammers handed out yet.
+          </p>
+        ) : (
+          <ul className="mt-2">
+            {builders.map((builder) => (
+              <li
+                key={builder.id}
+                className="flex min-h-[44px] flex-wrap items-center gap-x-2 py-1 text-[16px]"
+              >
+                <span className="font-medium">{builder.name}</span>
+                <HammerGlyph />
+                <span className="font-data text-[11px] text-[var(--dim)]">
+                  <TripCode code={builder.code} />
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <form
+          className="mt-6"
+          onSubmit={(e) => {
+            e.preventDefault();
+            setBuilderResult(null);
+            setHammer.mutate();
+          }}
+        >
+          <div className="nes-field">
+            <label
+              htmlFor="operator-builder-code"
+              className="font-data block text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]"
+            >
+              Listener !code
+            </label>
+            <input
+              id="operator-builder-code"
+              aria-label="Listener !code"
+              value={builderCode}
+              onChange={(e) => setBuilderCode(e.target.value)}
+              autoComplete="off"
+              className="nes-input is-dark mt-1 min-h-[48px] w-full text-[16px]"
+            />
+          </div>
+          <div
+            className="mt-5 grid grid-cols-2 gap-2"
+            role="group"
+            aria-label="Builder grant choice"
+          >
+            <button
+              type="button"
+              aria-pressed={builderGrant}
+              onClick={() => setBuilderGrant(true)}
+              className={`font-pixel min-h-[44px] px-3 text-[11px] ${
+                builderGrant
+                  ? "bg-[var(--accent)] text-[var(--on-accent)]"
+                  : "border border-[var(--border)] text-[var(--text)]"
+              }`}
+            >
+              Grant
+            </button>
+            <button
+              type="button"
+              aria-pressed={!builderGrant}
+              onClick={() => setBuilderGrant(false)}
+              className={`font-pixel min-h-[44px] px-3 text-[11px] ${
+                !builderGrant
+                  ? "bg-[var(--accent)] text-[var(--on-accent)]"
+                  : "border border-[var(--border)] text-[var(--text)]"
+              }`}
+            >
+              Remove
+            </button>
+          </div>
+          <button
+            type="submit"
+            disabled={setHammer.isPending || builderCode.trim().length === 0}
+            className="nes-btn is-pink font-pixel mt-5 min-h-[48px] w-full px-4 text-[14px] disabled:opacity-40"
+          >
+            {setHammer.isPending
+              ? "Working…"
+              : builderGrant
+                ? "Hand out the hammer"
+                : "Take the hammer back"}
+          </button>
+          {builderResult && (
+            <p
+              role={builderResult.ok ? "status" : "alert"}
+              className={`mt-4 text-[15px] leading-relaxed ${
+                builderResult.ok ? "text-[#4ade80]" : "text-[#f87171]"
+              }`}
+            >
+              {builderResult.text}
             </p>
           )}
         </form>
