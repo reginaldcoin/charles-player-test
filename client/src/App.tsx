@@ -661,6 +661,27 @@ export function App() {
     count: 0,
     lastAt: 0,
   });
+  // Media Session pause stamp (2026-11-16, sleep fix v2): our own
+  // lock-screen pause handler stamps this before it pauses the
+  // element, so the pause listener can tell a deliberate lock-screen
+  // pause (sacred) from a bare system pause landing in the dark with
+  // no stamp at all (a steal the episode machinery may answer).
+  const msPauseStampRef = useRef(0);
+  // Same-track error retry (2026-11-16, the handoff cascade): an
+  // error mid-playback is usually the network changing chairs under
+  // the stream — cellular to Wi-Fi in an elevator — not a bad file.
+  // The error path now retries THIS track (reattach the stream at
+  // the last heard position) a few times across several seconds
+  // before it may advance, and lastErrAdvanceAtRef spaces the error
+  // advances themselves, so a dead network can slow the deck but
+  // never send it cascading through the catalog.
+  const errRetryRef = useRef<{
+    track: number;
+    attempts: number;
+    at: number;
+    pending: boolean;
+  } | null>(null);
+  const lastErrAdvanceAtRef = useRef(0);
   const hideFlushRef = useRef<{ trackIdx: number; at: number } | null>(null);
   // Reopen save bookkeeping (2026-11-11): lastSaveRef dedupes the
   // continuous writes (a write happens when the saved second, the
@@ -1277,6 +1298,9 @@ export function App() {
       ladderStageRef.current = 0;
       ladderProbeRef.current = null;
       ladderReloadsRef.current = 0;
+      // A track change buries any same-track error retry episode
+      // still counting down for the outgoing song.
+      errRetryRef.current = null;
       setNowIdx(idx);
       setTrackClock({ elapsed: 0, duration: tr.durationSec ?? 0 });
       tapeRef.current?.markChange();
@@ -1362,6 +1386,58 @@ export function App() {
       setIsPlaying(false);
       return;
     }
+    // SAME-TRACK RETRY FIRST (2026-11-16, the handoff cascade): six
+    // or seven songs skipped back to back in an elevator while the
+    // phone changed networks — every fresh track inherited the same
+    // dead stream and died the same death. An error now reattaches
+    // THIS track at the last heard position, three attempts across
+    // several seconds of backoff, before any advance is allowed.
+    // Only sustained failure across the whole retry window earns a
+    // skip; a genuinely broken file still gets one, just honestly.
+    const idx = currentRef.current;
+    const audio = audioRef.current;
+    const tr = idx >= 0 ? CATALOG[idx] : undefined;
+    if (audio && tr) {
+      const ep =
+        errRetryRef.current?.track === idx
+          ? errRetryRef.current
+          : { track: idx, attempts: 0, at: 0, pending: false };
+      errRetryRef.current = ep;
+      if (ep.pending) return; // a retry is already counting down
+      if (ep.attempts < 3) {
+        ep.attempts += 1;
+        ep.at = Date.now();
+        ep.pending = true;
+        const BACKOFFS = [1200, 2500, 4500];
+        const backoff =
+          BACKOFFS[Math.min(ep.attempts - 1, BACKOFFS.length - 1)] ?? 1200;
+        recEvent("errretry", { ...recSnap(), stage: ep.attempts });
+        window.setTimeout(() => {
+          ep.pending = false;
+          // The deck moved on while the backoff ran — a skip, an
+          // advance, a play event that buried the episode — or the
+          // listener paused from the lock screen in the meantime:
+          // stand down either way.
+          if (currentRef.current !== idx || errRetryRef.current !== ep)
+            return;
+          if (msPauseStampRef.current >= ep.at) return;
+          const pos = lastProgressRef.current;
+          const resume = () => {
+            try {
+              audio.currentTime = pos;
+            } catch {
+              // Not seekable yet: play from wherever it lands.
+            }
+            audio.removeEventListener("loadedmetadata", resume);
+          };
+          audio.addEventListener("loadedmetadata", resume);
+          audio.src =
+            blobRef.current?.idx === idx ? blobRef.current.url : tr.src;
+          void audio.play().catch(() => undefined);
+        }, backoff);
+        return;
+      }
+    }
     // Burst cap: three error advances inside 10s of each other is a
     // wedged element falling down its own staircase (the haunted skip
     // cascade), not three bad tracks. Stop on the current track and
@@ -1378,7 +1454,15 @@ export function App() {
       window.setTimeout(() => setLastAward(null), 5000);
       return;
     }
+    // SPACED ADVANCE (2026-11-16): an error advance may never land
+    // within 8s of the last one. With the same-track retries in
+    // front, an advance is already rare; this spacing is the hard
+    // floor under the cascade — errors alone can slow the deck to a
+    // crawl, never set it running through songs.
+    const wait = Math.max(1200, lastErrAdvanceAtRef.current + 8000 - now);
     window.setTimeout(() => {
+      lastErrAdvanceAtRef.current = Date.now();
+      errRetryRef.current = null;
       // Same rule as the natural handoff: settle in the background,
       // load the next track now — never gate playback on the POST.
       // Inside a set, an error walks the set's order like a skip
@@ -1393,8 +1477,8 @@ export function App() {
       setRef.current = action.set;
       syncSetUi();
       loadTrack(action.kind === "shuffle" ? pickNext() : action.index, true);
-    }, 1200);
-  }, [reportPlay, pickNext, loadTrack, syncSetUi]);
+    }, wait);
+  }, [reportPlay, pickNext, loadTrack, syncSetUi, recSnap]);
 
   // THE STALL EVALUATION (extracted 2026-11-13, the wake-side fix).
   // This is the ladder block the 250ms interval used to carry inline,
@@ -1538,6 +1622,36 @@ export function App() {
     });
     audio.addEventListener("pause", () => {
       recEvent("pause", recSnap());
+      // Hidden-pause discrimination (2026-11-16, sleep fix v2): fix
+      // v1's blind spot. The auto-resume branch keys off
+      // isPlayingRef, and this listener used to clear it on ANY
+      // pause — so an EVENTED pause in the dark (the system pausing
+      // the element as the phone slept) disarmed the only recovery
+      // before it could run, and the music stayed dead till wake.
+      // Now a pause is judged before it is obeyed: one that lands
+      // while the page is HIDDEN, with no Media Session pause stamp
+      // behind it, is a steal, not an intent — the playing flag
+      // stands, the save keeps wasPlaying, and the tick's episode
+      // machinery raises its bounded attempts as it does for an
+      // event-less steal. Pauses while visible never reach this
+      // branch, and a lock-screen pause carries our own stamp from
+      // the Media Session handler below: both stay sacred, exactly
+      // as before.
+      const hiddenSteal =
+        document.visibilityState === "hidden" &&
+        isPlayingRef.current &&
+        Date.now() - msPauseStampRef.current > 1500;
+      if (hiddenSteal) {
+        recEvent("hiddenpause", recSnap());
+        try {
+          if ("mediaSession" in navigator)
+            navigator.mediaSession.playbackState = "paused";
+        } catch {
+          // Garnish only.
+        }
+        persistResume(true);
+        return;
+      }
       isPlayingRef.current = false;
       setIsPlaying(false);
       try {
@@ -1556,6 +1670,9 @@ export function App() {
     audio.addEventListener("playing", () => {
       // Real motion again: the watchdog stands down for this track.
       recEvent("playing", recSnap());
+      // Motion also buries a same-track error retry episode: the
+      // stream healed, the next error starts a fresh count.
+      errRetryRef.current = null;
       stallAttemptsRef.current = 0;
       stallHintRef.current = false;
       stallSinceRef.current = 0;
@@ -1584,6 +1701,11 @@ export function App() {
         });
         navigator.mediaSession.setActionHandler("pause", () => {
           recEvent("msaction", { ...recSnap(), note: "pause" });
+          // Stamp our own deliberate pause BEFORE the element hears
+          // it, so the pause listener's hidden-pause discrimination
+          // can tell this lock-screen intent from a bare system
+          // pause landing in the dark (sleep fix v2, 2026-11-16).
+          msPauseStampRef.current = Date.now();
           audio.pause();
         });
         navigator.mediaSession.setActionHandler("nexttrack", () => {
@@ -2103,6 +2225,41 @@ export function App() {
       timers = [];
     };
   }, []);
+
+  // Freeze last-gasp (2026-11-16, sleep fix v2): the Page Lifecycle
+  // freeze event is the last code a page being put on ice is
+  // guaranteed to run. If the durable save says the listener left it
+  // playing — the same wasPlaying intent the reopen honors — spend
+  // that final beat on one play() attempt: a page that enters the
+  // frozen state already playing gives the browser no silent page
+  // to keep frozen, while a page he paused himself is never touched
+  // (the save's flag is down and the gate holds). Best-effort by
+  // construction: a page frozen before the event, or killed
+  // outright, runs nothing at all — the wake reconcile and the
+  // reopen save remain the real recoveries, this is only the last
+  // word the dying page gets to say.
+  useEffect(() => {
+    const onFreeze = () => {
+      const audio = audioRef.current;
+      if (!audio || currentRef.current < 0 || !audio.paused) return;
+      let wasPlaying = isPlayingRef.current;
+      try {
+        const raw = localStorage.getItem(RESUME_KEY);
+        if (raw) {
+          const save = JSON.parse(raw) as { wasPlaying?: unknown };
+          if (typeof save.wasPlaying === "boolean")
+            wasPlaying = save.wasPlaying;
+        }
+      } catch {
+        // No readable save: the live flag is the testimony we have.
+      }
+      if (!wasPlaying) return;
+      recEvent("freezegasp", recSnap());
+      void audio.play().catch(() => undefined);
+    };
+    document.addEventListener("freeze", onFreeze);
+    return () => document.removeEventListener("freeze", onFreeze);
+  }, [recSnap]);
 
   // --- Flight recorder: boot judgment + lifecycle ears (2026-11-11) -----------
   // On mount, judge the previous session: if its ring does not end in
