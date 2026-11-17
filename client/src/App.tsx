@@ -3243,7 +3243,7 @@ function Standings({
           </h2>
           <p className="font-data text-[11px] uppercase leading-relaxed tracking-[0.12em] text-[var(--dim)]">
             Ranked by listening score · 1 pt a minute, counted fractionally
-            second by second · +10 a finish · +25 a first listen in a week ·
+            second by second · +25 a first listen in a week ·
             scored time capped at 8 hours a day
           </p>
         </div>
