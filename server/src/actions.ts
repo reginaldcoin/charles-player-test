@@ -2003,7 +2003,7 @@ export const Actions = {
 
   getHistory: defineAction({
     description:
-      "Returns the board's HISTORY feed: the current reign pinned on top, then one merged stream of headlines, newest first — crossings (every pass on the board, re-derived from the plays ledger by replay) and site updates (posted by the operators), capped at the latest 50. Public, like the board itself.",
+      "Returns the board's HISTORY feed: the current reign pinned on top, then one merged stream of headlines, newest first — crossings (every pass on the board, re-derived from the plays ledger by replay) and site updates (posted by the operators), capped at the latest 50. The same response also carries the latest site updates as their own list (updates), so the SITE UPDATES tab reads them in their own right and crossings can never crowd them out of the capped stream. Public, like the board itself.",
     request: z.object({}),
     response: z.object({
       reign: z
@@ -2014,6 +2014,16 @@ export const Actions = {
         })
         .nullable(),
       items: z.array(
+        z.object({
+          kind: z.enum(["crossing", "update"]),
+          id: z.number().nullable(),
+          atMs: z.number(),
+          text: z.string(),
+          crown: z.boolean(),
+          topTen: z.boolean(),
+        }),
+      ),
+      updates: z.array(
         z.object({
           kind: z.enum(["crossing", "update"]),
           id: z.number().nullable(),
@@ -2096,17 +2106,21 @@ export const Actions = {
           seq: ev.seq,
         });
       }
-      for (const u of updates) {
-        items.push({
-          kind: "update",
-          id: u.id,
-          atMs: u.createdAt.getTime(),
-          text: u.text,
-          crown: false,
-          topTen: false,
-          seq: u.id,
-        });
-      }
+      // The updates in their own right, newest first (the query above
+      // already reads them id-desc). They join the merged stream below
+      // AND go back as their own list: the merged cap is 50 items and
+      // crossings mint far faster than updates land, so an update
+      // falls out of the stream within hours while its row lives on.
+      const updateItems: Item[] = updates.map((u) => ({
+        kind: "update",
+        id: u.id,
+        atMs: u.createdAt.getTime(),
+        text: u.text,
+        crown: false,
+        topTen: false,
+        seq: u.id,
+      }));
+      items.push(...updateItems);
       // Newest first; a dead tie goes to the operator's word, then to
       // the later sequence — deterministic on every read.
       items.sort(
@@ -2118,6 +2132,9 @@ export const Actions = {
       return {
         reign,
         items: items.slice(0, 50).map(({ seq: _seq, ...rest }) => rest),
+        updates: updateItems
+          .slice(0, 50)
+          .map(({ seq: _seq, ...rest }) => rest),
       };
     },
   }),

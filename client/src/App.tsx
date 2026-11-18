@@ -3393,8 +3393,9 @@ function Standings({
 // HISTORY — the board's life and the site's life in one stream, at the
 // foot of the standings. The current reign stays pinned over the feed;
 // below it, headlines newest first: every crossing on the board and
-// every site update the operators post. Filters are this room's own —
-// the server sends one merged stream, the tabs just narrow the read.
+// every site update the operators post. The ALL and POINT BATTLE tabs
+// narrow the server's merged stream; SITE UPDATES reads the server's
+// own updates list, which the capped stream cannot crowd out.
 // ---------------------------------------------------------------------------
 
 function HistorySection() {
@@ -3406,14 +3407,15 @@ function HistorySection() {
   const [filter, setFilter] = useState<"all" | "battle" | "updates">("all");
 
   const data: HistoryData | undefined = history.data;
+  // The updates tab reads the server's own updates list, not a filter
+  // of the capped merged stream — crossings mint faster than updates
+  // land, so a filtered read goes empty while updates still exist.
   const items =
-    data?.items.filter((item) =>
-      filter === "all"
-        ? true
-        : filter === "battle"
-          ? item.kind === "crossing"
-          : item.kind === "update",
-    ) ?? [];
+    filter === "updates"
+      ? (data?.updates ?? [])
+      : (data?.items.filter(
+          (item) => filter === "all" || item.kind === "crossing",
+        ) ?? []);
 
   const tabs = [
     ["all", "ALL"],
@@ -4591,8 +4593,7 @@ function OperatorTools({ identity }: { identity: Identity }) {
     queryKey: ["history"],
     queryFn: () => api.getHistory({}),
   });
-  const postedUpdates =
-    historyFeed.data?.items.filter((item) => item.kind === "update") ?? [];
+  const postedUpdates = historyFeed.data?.updates ?? [];
   const hunters =
     board.data?.listeners.filter((listener) => listener.bugHunter) ?? [];
   const builders =
