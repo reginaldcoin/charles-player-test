@@ -25,6 +25,14 @@ export interface CrossingEvent {
   /** The crosser's rank (1-based) after the play. One play that jumps
       several listeners gives every crossed pair this same rank. */
   newRank: number;
+  /** The crosser's rank (1-based) before the play, or null when the
+      play put them on the board for the first time. Headlines use it
+      to tell an entry into a band from a climb inside it. */
+  oldRank: number | null;
+  /** The crossed listener's rank (1-based) before the play. Headlines
+      use it at № 1: crown language is only true of the listener who
+      actually held the top spot. */
+  crossedRank: number;
   /** Chronological sequence among all crossings — stable across reads,
       so headline phrasing rotation never reshuffles between loads. */
   seq: number;
@@ -85,12 +93,16 @@ export function computeCrossings(
       oldIndex >= 0
         ? ranking.slice(newIndex, oldIndex)
         : ranking.slice(newIndex);
-    for (const crossedId of crossed) {
+    for (let k = 0; k < crossed.length; k++) {
       events.push({
         atMs: p.playedAtMs,
         crosserId: p.listenerId,
-        crossedId,
+        crossedId: crossed[k]!,
         newRank: newIndex + 1,
+        oldRank: oldIndex >= 0 ? oldIndex + 1 : null,
+        // In the post-removal ranking the crossed listener at slice
+        // position k sat at index newIndex + k before the play.
+        crossedRank: newIndex + k + 1,
         seq: seq++,
       });
     }
@@ -114,20 +126,36 @@ export function crossingHeadline(
   const x = crosserName;
   const y = crossedName;
   const r = ev.newRank;
+  // The bank follows what actually happened: crown language only for
+  // the listener who held № 1, entry language only for a crosser who
+  // came from outside the top 10, landing language for a climb inside
+  // it. A play that jumps several listeners to № 1 crosses the lower
+  // ones on the way — plain words for those pairs.
   const bank =
     r === 1
-      ? [
-          `${x} takes the crown — ${y} crossed at the top. New № 1.`,
-          `The crown moves: ${x} over ${y} for № 1.`,
-          `New champ. ${x} crosses ${y} and takes № 1.`,
-          `${x} is № 1. ${y} got crossed at the top.`,
-        ]
-      : r <= 10
+      ? ev.crossedRank === 1
         ? [
-            `${x} breaks into the top 10 — past ${y}, up to № ${r}.`,
-            `Top 10, new name: ${x} crosses ${y} for № ${r}.`,
-            `${x} moves into the ten, over ${y}. № ${r}.`,
+            `${x} takes the crown — ${y} crossed at the top. New № 1.`,
+            `The crown moves: ${x} over ${y} for № 1.`,
+            `New champ. ${x} crosses ${y} and takes № 1.`,
+            `${x} is № 1. ${y} got crossed at the top.`,
           ]
+        : [
+            `${x} crosses ${y} on the way to № 1.`,
+            `${x} passes ${y} on the way to № 1.`,
+          ]
+      : r <= 10
+        ? ev.oldRank === null || ev.oldRank > 10
+          ? [
+              `${x} breaks into the top 10 — past ${y}, up to № ${r}.`,
+              `Top 10, new name: ${x} crosses ${y} for № ${r}.`,
+              `${x} moves into the top 10, over ${y}. № ${r}.`,
+            ]
+          : [
+              `${x} climbs to № ${r} — over ${y}.`,
+              `${x} up to № ${r}, past ${y}.`,
+              `${x} moves up: over ${y}. № ${r} now.`,
+            ]
         : [
             `${x} just crossed ${y}. № ${r} now.`,
             `${x} moves past ${y} — up to № ${r}.`,
