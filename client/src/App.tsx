@@ -3081,7 +3081,8 @@ function BoardWindow({
 }
 
 // One standings row, the same on the face and in the all-listeners window:
-// rank, name with its marks, minutes and champ time, the day's bars, score.
+// rank, name with its marks, champ time, the day's bars, score. Minutes
+// ride along only on your own row — the server sends nobody else's.
 function ListenerRow({
   listener: l,
   identity,
@@ -3114,9 +3115,11 @@ function ListenerRow({
           <PresenceDot lastActiveMs={l.lastActiveMs} />
         </span>
         <span className="font-data block text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
-          {l.minutes} min
-          {l.champMs > 0 && <> · {fmtReign(l.champMs)} as champ</>}
-          {l.streakDays >= 2 && <> · {l.streakDays} day streak</>}
+          {[
+            ...(l.minutes !== null ? [`${l.minutes} min`] : []),
+            ...(l.champMs > 0 ? [`${fmtReign(l.champMs)} as champ`] : []),
+            ...(l.streakDays >= 2 ? [`${l.streakDays} day streak`] : []),
+          ].join(" · ")}
         </span>
         <span className="mt-1 block">
           <DayBars bars={l.dayBars} />
@@ -3195,8 +3198,8 @@ function Standings({
   onPlayTrack: (trackTitle: string, project: string) => void;
 }) {
   const board = useQuery({
-    queryKey: ["board"],
-    queryFn: () => api.getBoard({}),
+    queryKey: ["board", identity?.id ?? null],
+    queryFn: () => api.getBoard({ token: identity?.token }),
     refetchInterval: 30000,
   });
   const love = useQuery({
@@ -3319,8 +3322,15 @@ function Standings({
                   {fmtPts1(top.score)}
                 </p>
                 <p className="font-data mt-2 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
-                  {top.minutes} minutes · {top.depth} deep
-                  {top.streakDays >= 2 && <> · {top.streakDays} day streak</>}
+                  {[
+                    ...(top.minutes !== null
+                      ? [`${top.minutes} minutes`]
+                      : []),
+                    `${top.depth} deep`,
+                    ...(top.streakDays >= 2
+                      ? [`${top.streakDays} day streak`]
+                      : []),
+                  ].join(" · ")}
                 </p>
                 {top.reignSinceMs > 0 && (
                   <p className="font-data mt-2 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">

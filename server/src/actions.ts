@@ -960,8 +960,8 @@ export const Actions = {
 
   getBoard: defineAction({
     description:
-      "Returns THE LISTENERS standings: every listener with points ranked by score (points get you on the board; zero-point claims stay off it), plus board totals. Empty until the first play lands.",
-    request: z.object({}),
+      "Returns THE LISTENERS standings: every listener with points ranked by score (points get you on the board; zero-point claims stay off it), plus board totals. Empty until the first play lands. Minutes are private: a row carries them only when the caller's token names that listener; every other row's minutes are null.",
+    request: z.object({ token: z.string().optional() }),
     response: z.object({
       listeners: z.array(
         z.object({
@@ -975,7 +975,7 @@ export const Actions = {
           hourglass: z.boolean(),
           streakDays: z.number(),
           score: z.number(),
-          minutes: z.number(),
+          minutes: z.number().nullable(),
           depth: z.number(),
           dayBars: z.array(z.number()),
           lastActiveMs: z.number(),
@@ -990,8 +990,18 @@ export const Actions = {
         minutes: z.number(),
       }),
     }),
-    async handler(ctx) {
+    async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
+      // Minutes are private: resolve the caller when a token rides
+      // along; a bad or expired token reads as anonymous, never an error.
+      let callerId: number | null = null;
+      if (args.token) {
+        try {
+          callerId = (await resolveListener(db, args.token))?.id ?? null;
+        } catch {
+          callerId = null;
+        }
+      }
       const all = await db.select().from(schema.listeners);
       const states = await db.select().from(schema.listenerState);
       const stateById = new Map(states.map((s) => [s.listenerId, s]));
@@ -1139,7 +1149,7 @@ export const Actions = {
           hourglass: hourglassIds.has(r.id),
           streakDays: streakById.get(r.id) ?? 0,
           score: r.score,
-          minutes: r.minutes,
+          minutes: callerId === r.id ? r.minutes : null,
           depth: r.depth,
           dayBars: r.dayBars,
           lastActiveMs: r.lastActiveMs,
