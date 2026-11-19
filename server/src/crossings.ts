@@ -164,3 +164,28 @@ export function crossingHeadline(
           ];
   return bank[ev.seq % bank.length]!;
 }
+
+// A play that jumps several listeners is one jump, not several: the
+// feed carries a single headline naming everyone the play passed,
+// highest first (the order the pairs were minted). One template per
+// band — the line is already dense, and rotating near-identical group
+// lines is what made the feed repeat itself.
+export function crossingGroupHeadline(
+  ev: CrossingEvent,
+  crosserName: string,
+  crossedNames: string[],
+): string {
+  const x = crosserName;
+  const r = ev.newRank;
+  const list =
+    crossedNames.length === 2
+      ? `${crossedNames[0]} and ${crossedNames[1]}`
+      : `${crossedNames.slice(0, -1).join(", ")} and ${crossedNames[crossedNames.length - 1]}`;
+  if (r === 1) return `${x} takes the crown — past ${list}. New № 1.`;
+  if (r <= 10) {
+    return ev.oldRank === null || ev.oldRank > 10
+      ? `${x} breaks into the top 10 — past ${list}, up to № ${r}.`
+      : `${x} climbs to № ${r} — past ${list}.`;
+  }
+  return `${x} moves past ${list} — up to № ${r}.`;
+}

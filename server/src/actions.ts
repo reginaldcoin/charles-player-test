@@ -36,7 +36,11 @@ import { Privileged } from "@space/privileged";
 import { and, asc, desc, eq, gt, gte, inArray, lt, sql } from "drizzle-orm";
 import * as schema from "./schema";
 import { computeReigns } from "./reigns";
-import { computeCrossings, crossingHeadline } from "./crossings";
+import {
+  computeCrossings,
+  crossingHeadline,
+  crossingGroupHeadline,
+} from "./crossings";
 
 type Db = ReturnType<Ctx["db"]>;
 
@@ -2102,18 +2106,42 @@ export const Actions = {
         seq: number;
       };
       const items: Item[] = [];
-      for (const ev of crossings) {
-        const crosser = byId.get(ev.crosserId);
-        const crossed = byId.get(ev.crossedId);
-        if (!crosser || !crossed) continue;
+      // One play that jumps several listeners is one jump: group the
+      // pairs a single play minted (same crosser, same landing time,
+      // same climb, consecutive in the replay) into one headline
+      // naming everyone passed, instead of one line per listener all
+      // stamped with the same rank.
+      for (let i = 0; i < crossings.length; i++) {
+        const first = crossings[i]!;
+        const crosser = byId.get(first.crosserId);
+        if (!crosser) continue;
+        const group = [first];
+        while (
+          i + 1 < crossings.length &&
+          crossings[i + 1]!.crosserId === first.crosserId &&
+          crossings[i + 1]!.atMs === first.atMs &&
+          crossings[i + 1]!.newRank === first.newRank &&
+          crossings[i + 1]!.oldRank === first.oldRank
+        ) {
+          group.push(crossings[++i]!);
+        }
+        const crossedNames: string[] = [];
+        for (const ev of group) {
+          const crossed = byId.get(ev.crossedId);
+          if (crossed) crossedNames.push(crossed.name);
+        }
+        if (crossedNames.length === 0) continue;
         items.push({
           kind: "crossing",
           id: null,
-          atMs: ev.atMs,
-          text: crossingHeadline(ev, crosser.name, crossed.name),
-          crown: ev.newRank === 1,
-          topTen: ev.newRank <= 10,
-          seq: ev.seq,
+          atMs: first.atMs,
+          text:
+            crossedNames.length === 1
+              ? crossingHeadline(first, crosser.name, crossedNames[0]!)
+              : crossingGroupHeadline(first, crosser.name, crossedNames),
+          crown: first.newRank === 1,
+          topTen: first.newRank <= 10,
+          seq: group[group.length - 1]!.seq,
         });
       }
       // The updates in their own right, newest first (the query above
