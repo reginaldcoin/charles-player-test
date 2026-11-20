@@ -2035,6 +2035,10 @@ export const Actions = {
           text: z.string(),
           crown: z.boolean(),
           topTen: z.boolean(),
+          crosserName: z.string().nullable(),
+          crossedNames: z.array(z.string()),
+          newRank: z.number().nullable(),
+          oldRank: z.number().nullable(),
         }),
       ),
       updates: z.array(
@@ -2045,6 +2049,10 @@ export const Actions = {
           text: z.string(),
           crown: z.boolean(),
           topTen: z.boolean(),
+          crosserName: z.string().nullable(),
+          crossedNames: z.array(z.string()),
+          newRank: z.number().nullable(),
+          oldRank: z.number().nullable(),
         }),
       ),
     }),
@@ -2103,6 +2111,10 @@ export const Actions = {
         text: string;
         crown: boolean;
         topTen: boolean;
+        crosserName: string | null;
+        crossedNames: string[];
+        newRank: number | null;
+        oldRank: number | null;
         seq: number;
       };
       const items: Item[] = [];
@@ -2141,6 +2153,10 @@ export const Actions = {
               : crossingGroupHeadline(first, crosser.name, crossedNames),
           crown: first.newRank === 1,
           topTen: first.newRank <= 10,
+          crosserName: crosser.name,
+          crossedNames,
+          newRank: first.newRank,
+          oldRank: first.oldRank,
           seq: group[group.length - 1]!.seq,
         });
       }
@@ -2156,6 +2172,10 @@ export const Actions = {
         text: u.text,
         crown: false,
         topTen: false,
+        crosserName: null,
+        crossedNames: [],
+        newRank: null,
+        oldRank: null,
         seq: u.id,
       }));
       items.push(...updateItems);

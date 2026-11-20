@@ -557,6 +557,8 @@ interface Identity {
 
 const ID_KEY = "chp.identity.v1";
 
+const LAST_VISIT_KEY = "zone00.lastVisit";
+
 function loadIdentity(): Identity | null {
   try {
     const raw = localStorage.getItem(ID_KEY);
@@ -2911,6 +2913,20 @@ export function App() {
             </p>
           </div>
 
+          <LiveWire
+            identity={identity}
+            onOpenHistory={() => {
+              setView("standings");
+              for (const delay of [80, 400]) {
+                window.setTimeout(() => {
+                  document
+                    .querySelector('section[aria-label="History"]')
+                    ?.scrollIntoView({ behavior: "smooth", block: "start" });
+                }, delay);
+              }
+            }}
+          />
+
           <CatalogSearch
             identity={identity}
             sessionStale={sessionStale}
@@ -3396,6 +3412,182 @@ function Standings({
 
       <HistorySection />
     </section>
+  );
+}
+
+
+// ---------------------------------------------------------------------------
+// THE LIVE WIRE — the board's headlines where the listening happens: a
+// one-line strip under the player rotating the newest history, and, on
+// arrival, a short catch-up of what moved while you were gone. Both read
+// the same getHistory stream the HISTORY archive renders; tapping the
+// strip opens that archive (the host wires the jump).
+// ---------------------------------------------------------------------------
+
+type HistoryItem = HistoryData["items"][number];
+
+function pickCatchUp(
+  items: HistoryItem[],
+  sinceMs: number,
+  myName: string | null,
+): HistoryItem[] {
+  const fresh = items.filter(
+    (i) => i.kind === "crossing" && i.atMs > sinceMs,
+  );
+  const picks: HistoryItem[] = [];
+  const take = (item: HistoryItem) => {
+    if (picks.length < 3 && !picks.includes(item)) picks.push(item);
+  };
+  // Moves that touched you: you climbed, or you were crossed.
+  if (myName) {
+    for (const item of fresh) {
+      if (
+        item.crosserName === myName ||
+        item.crossedNames.includes(myName)
+      ) {
+        take(item);
+      }
+    }
+  }
+  // The crown changing hands.
+  for (const item of fresh) {
+    if (item.crown) take(item);
+  }
+  // The biggest climbs left.
+  const gain = (i: { oldRank: number; newRank: number }) =>
+    i.oldRank - i.newRank;
+  const climbs = fresh
+    .filter(
+      (i): i is HistoryItem & { oldRank: number; newRank: number } =>
+        i.oldRank !== null && i.newRank !== null,
+    )
+    .sort((a, b) => gain(b) - gain(a));
+  for (const item of climbs) take(item);
+  return picks;
+}
+
+function LiveWire({
+  identity,
+  onOpenHistory,
+}: {
+  identity: Identity | null;
+  onOpenHistory: () => void;
+}) {
+  const history = useQuery({
+    queryKey: ["history"],
+    queryFn: () => api.getHistory({}),
+    refetchInterval: 30000,
+  });
+  const items = history.data?.items ?? [];
+  const wireItems = items.slice(0, 8);
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    if (wireItems.length < 2) return;
+    const t = window.setInterval(() => setTick((v) => v + 1), 4000);
+    return () => window.clearInterval(t);
+  }, [wireItems.length]);
+  const current =
+    wireItems.length > 0 ? wireItems[tick % wireItems.length]! : null;
+
+  // While you were gone — judged once, off the first read of the
+  // stream, against the previous visit's stamp; the stamp for the next
+  // visit is written in the same pass. A first visit has no stamp and
+  // gets no block.
+  const [catchUp, setCatchUp] = useState<HistoryItem[] | null>(null);
+  const [dismissed, setDismissed] = useState(false);
+  const judgedRef = useRef(false);
+  useEffect(() => {
+    if (judgedRef.current || !history.data) return;
+    judgedRef.current = true;
+    let prev = 0;
+    try {
+      prev = Number(localStorage.getItem(LAST_VISIT_KEY) ?? 0) || 0;
+      localStorage.setItem(LAST_VISIT_KEY, String(Date.now()));
+    } catch {
+      prev = 0;
+    }
+    if (prev > 0) {
+      setCatchUp(
+        pickCatchUp(history.data.items, prev, identity?.name ?? null),
+      );
+    }
+  }, [history.data, identity]);
+
+  if (!current && (!catchUp || catchUp.length === 0)) return null;
+
+  return (
+    <div className="chrome px-4 pt-4">
+      {catchUp && catchUp.length > 0 && !dismissed && (
+        <div className="mb-3 border-2 border-[var(--border)] px-3 py-2">
+          <div className="flex items-center justify-between gap-3">
+            <p className="font-pixel text-[11px] uppercase text-[var(--accent)]">
+              While you were gone
+            </p>
+            <button
+              type="button"
+              aria-label="Dismiss: while you were gone"
+              onClick={() => setDismissed(true)}
+              className="font-data px-2 text-[14px] leading-none text-[var(--dim)]"
+            >
+              ✕
+            </button>
+          </div>
+          <ul className="mt-1">
+            {catchUp.map((item, i) => (
+              <li
+                key={`gone-${item.atMs}-${i}`}
+                className="border-b border-dashed border-[var(--dim)] py-2 last:border-b-0"
+              >
+                <p
+                  className={`text-[15px] leading-relaxed ${
+                    item.crown
+                      ? "font-semibold text-[var(--accent)]"
+                      : ""
+                  }`}
+                >
+                  {item.crown && <ChampGlyph />}{" "}
+                  {item.text}
+                </p>
+                <p className="font-data mt-1 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+                  {fmtAgo(item.atMs)}
+                </p>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {current && (
+        <button
+          type="button"
+          onClick={onOpenHistory}
+          aria-label="The wire: latest board headlines. Open the full history."
+          className="flex min-h-[44px] w-full items-center gap-3 border-2 border-[var(--border)] px-3 py-2 text-left"
+        >
+          <span className="font-pixel shrink-0 text-[11px] uppercase text-[var(--accent)]">
+            The wire
+          </span>
+          <span
+            key={`${current.atMs}-${current.text}`}
+            className={`min-w-0 flex-1 truncate text-[15px] ${
+              current.crown
+                ? "font-semibold text-[var(--accent)]"
+                : ""
+            }`}
+          >
+            {current.crown && <ChampGlyph />}{" "}
+            {current.kind === "update" && (
+              <span className="font-data mr-2 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+                Site
+              </span>
+            )}
+            {current.text}
+          </span>
+          <span className="font-data shrink-0 text-[11px] uppercase tracking-[0.12em] text-[var(--dim)]">
+            {fmtAgo(current.atMs)}
+          </span>
+        </button>
+      )}
+    </div>
   );
 }
 
